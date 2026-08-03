@@ -1,0 +1,667 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Кто когда свободен — планировщик команды</title>
+<script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+<script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+<script src="https://cdn.tailwindcss.com"></script>
+<style>
+  html,body,#root{ height:100%; margin:0; }
+  body{ background:#F4F5F8; }
+</style>
+</head>
+<body>
+<div id="root"></div>
+
+<script type="text/babel" data-presets="react">
+const { useState, useEffect, useCallback, useMemo, useRef } = React;
+
+/* ======================================================================
+   НАСТРОЙКА: вставь сюда URL своей Firebase Realtime Database.
+   Firebase Console -> Build -> Realtime Database -> скопировать URL вида
+   https://your-project-default-rtdb.europe-west1.firebasedatabase.app
+   (без слэша на конце)
+   ====================================================================== */
+const DB_URL = "https://ВАШ-ПРОЕКТ-default-rtdb.firebaseio.com";
+
+/* Простые иконки-заглушки без внешних зависимостей (вместо lucide-react) */
+function mkIcon(char){
+  return function Icon({ size = 16, color, className, style, ...rest }) {
+    return React.createElement("span", {
+      style: { fontSize: size, color, lineHeight: 1, display: "inline-block", ...style },
+      className, ...rest
+    }, char);
+  };
+}
+const ChevronLeft = mkIcon("‹");
+const ChevronRight = mkIcon("›");
+const Plus = mkIcon("+");
+const X = mkIcon("✕");
+const Check = mkIcon("✓");
+const Bell = mkIcon("🔔");
+const RefreshCw = mkIcon("⟳");
+const Video = mkIcon("🎥");
+const UserPlus = mkIcon("＋");
+const Trash2 = mkIcon("🗑");
+const Users = mkIcon("👥");
+const CalendarClock = mkIcon("🗓");
+const Ban = mkIcon("🚫");
+
+
+const STORAGE_KEY = "scheduler-v1";
+const PALETTE = ["#4F5FFF", "#0EA5A0", "#E0578A", "#D97E1B", "#6B5CE0", "#2E9E5B", "#C2410C", "#0F7CBF", "#B8860B", "#8B5CF6"];
+const WEEKDAYS = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"];
+const MONTHS = ["январь","февраль","март","апрель","май","июнь","июль","август","сентябрь","октябрь","ноябрь","декабрь"];
+
+function pad(n){ return String(n).padStart(2,"0"); }
+function dateStr(y,m,d){ return `${y}-${pad(m+1)}-${pad(d)}`; }
+function todayStr(){ const t=new Date(); return dateStr(t.getFullYear(), t.getMonth(), t.getDate()); }
+function weekdayOfDate(ds){ const [y,m,d]=ds.split("-").map(Number); return (new Date(y,m-1,d).getDay()+6)%7; }
+function genTimeSlots(){ const out=[]; for(let h=8;h<=20;h++){ out.push(`${pad(h)}:00`); out.push(`${pad(h)}:30`);} return out; }
+const TIME_SLOTS = genTimeSlots();
+function slotIndex(t){ return TIME_SLOTS.indexOf(t); }
+function addMinutes(t, mins){ const [h,m]=t.split(":").map(Number); const total=h*60+m+mins; const hh=Math.floor(total/60), mm=total%60; return `${pad(hh)}:${pad(mm)}`; }
+function slotsForRange(startTime, durMin){ const n=Math.max(1, Math.round(durMin/30)); const startIdx=slotIndex(startTime); if(startIdx<0) return []; const out=[]; for(let i=0;i<n;i++){ if(TIME_SLOTS[startIdx+i]) out.push(TIME_SLOTS[startIdx+i]); } return out; }
+
+function defaultState(){
+  return { team: [], recurring: [], busySlots: [], dayOffs: [], zoomSlots: [], requests: [] };
+}
+
+async function loadState(){
+  try{
+    const res = await fetch(`${DB_URL}/${STORAGE_KEY}.json`);
+    const data = await res.json();
+    if(data) return data;
+  }catch(e){ console.error("load failed", e); }
+  return defaultState();
+}
+async function saveState(state){
+  try{
+    await fetch(`${DB_URL}/${STORAGE_KEY}.json`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(state)
+    });
+  }catch(e){ console.error("storage save failed", e); }
+}
+
+function personColor(team, id){ const p = team.find(t=>t.id===id); return p ? p.color : "#999"; }
+function personName(team, id){ const p = team.find(t=>t.id===id); return p ? p.name : "?"; }
+
+function isPersonBusyAt(state, personId, date, time){
+  const wd = weekdayOfDate(date);
+  const off = state.dayOffs.some(o=>o.personId===personId && o.date===date);
+  if(off) return { busy:true, kind:"dayoff", label:"Нерабочий день" };
+  const rec = state.recurring.find(r=>{
+    if(r.weekday!==wd) return false;
+    if(!(r.attendees==="all" || (r.attendees||[]).includes(personId))) return false;
+    return slotsForRange(r.startTime, r.durationMin).includes(time);
+  });
+  if(rec) return { busy:true, kind:"recurring", label:rec.title };
+  const manual = state.busySlots.find(s=>s.personId===personId && s.date===date && s.time===time);
+  if(manual) return { busy:true, kind: manual.type==="event"?"event":"manual", label: manual.label||"Занято" };
+  return { busy:false };
+}
+function isZoomBusyAt(state, date, time){
+  const wd = weekdayOfDate(date);
+  const rec = state.recurring.find(r=> r.weekday===wd && r.zoom && slotsForRange(r.startTime, r.durationMin).includes(time));
+  if(rec) return { busy:true, kind:"recurring", label:rec.title };
+  const z = state.zoomSlots.find(s=>s.date===date && s.time===time);
+  if(z) return { busy:true, kind: z.kind==="event"?"event":"manual", label: z.label||"Zoom занят" };
+  return { busy:false };
+}
+
+function App(){
+  const [state, setState] = useState(defaultState());
+  const [loading, setLoading] = useState(true);
+  const [me, setMe] = useState("");
+  const [viewYM, setViewYM] = useState(()=>{ const t=new Date(); return {y:t.getFullYear(), m:t.getMonth()}; });
+  const [selectedDate, setSelectedDate] = useState(todayStr());
+  const [showNewEvent, setShowNewEvent] = useState(false);
+  const [showInbox, setShowInbox] = useState(false);
+  const [showAddPerson, setShowAddPerson] = useState(false);
+  const [showRecForm, setShowRecForm] = useState(false);
+  const [newPersonName, setNewPersonName] = useState("");
+  const [toast, setToast] = useState("");
+  const modalOpen = showNewEvent || showInbox || showAddPerson || showRecForm;
+  const pollRef = useRef(null);
+
+  const refresh = useCallback(async ()=>{ const s = await loadState(); setState(s); }, []);
+
+  useEffect(()=>{ (async()=>{ const s = await loadState(); setState(s); setLoading(false); })(); }, []);
+  useEffect(()=>{
+    pollRef.current = setInterval(()=>{ if(!modalOpenRef.current) refresh(); }, 15000);
+    return ()=>clearInterval(pollRef.current);
+  }, [refresh]);
+  const modalOpenRef = useRef(false);
+  useEffect(()=>{ modalOpenRef.current = modalOpen; }, [modalOpen]);
+
+  function flash(msg){ setToast(msg); setTimeout(()=>setToast(""), 2200); }
+
+  async function commit(mutator){
+    setState(prev=>{
+      const next = mutator(structuredClone(prev));
+      saveState(next);
+      return next;
+    });
+  }
+
+  function addPerson(name){
+    if(!name.trim()) return;
+    const id = "p_" + Date.now().toString(36);
+    const color = PALETTE[state.team.length % PALETTE.length];
+    commit(s=>{ s.team.push({id, name: name.trim(), color}); return s; });
+    setMe(id);
+    setNewPersonName("");
+    setShowAddPerson(false);
+  }
+  function removePerson(id){
+    commit(s=>{
+      s.team = s.team.filter(p=>p.id!==id);
+      s.busySlots = s.busySlots.filter(b=>b.personId!==id);
+      s.dayOffs = s.dayOffs.filter(d=>d.personId!==id);
+      s.recurring.forEach(r=>{ if(Array.isArray(r.attendees)) r.attendees = r.attendees.filter(a=>a!==id); });
+      s.requests.forEach(r=>{ r.attendees = r.attendees.filter(a=>a!==id); delete r.responses[id]; });
+      return s;
+    });
+    if(me===id) setMe("");
+  }
+
+  function toggleMySlot(date, time){
+    if(!me) { flash("Сначала выбери, кто ты"); return; }
+    const info = isPersonBusyAt(state, me, date, time);
+    if(info.busy && info.kind!=="manual" && info.kind!=="event"){ flash("Это из повторяющейся встречи или отгула"); return; }
+    commit(s=>{
+      const idx = s.busySlots.findIndex(b=>b.personId===me && b.date===date && b.time===time);
+      if(idx>=0) s.busySlots.splice(idx,1);
+      else s.busySlots.push({id:"b_"+Date.now().toString(36)+Math.random().toString(36).slice(2,5), personId:me, date, time, type:"manual", label:"Занят(а)"});
+      return s;
+    });
+  }
+  function toggleZoomSlot(date, time){
+    const info = isZoomBusyAt(state, date, time);
+    if(info.busy && info.kind==="recurring"){ flash("Занято повторяющейся встречей"); return; }
+    commit(s=>{
+      const idx = s.zoomSlots.findIndex(z=>z.date===date && z.time===time);
+      if(idx>=0) s.zoomSlots.splice(idx,1);
+      else s.zoomSlots.push({id:"z_"+Date.now().toString(36)+Math.random().toString(36).slice(2,5), date, time, kind:"manual", label:"Zoom занят"});
+      return s;
+    });
+  }
+  function toggleDayOff(){
+    if(!me){ flash("Сначала выбери, кто ты"); return; }
+    commit(s=>{
+      const idx = s.dayOffs.findIndex(o=>o.personId===me && o.date===selectedDate);
+      if(idx>=0) s.dayOffs.splice(idx,1);
+      else s.dayOffs.push({personId:me, date:selectedDate});
+      return s;
+    });
+  }
+
+  function addRecurring(rec){
+    commit(s=>{ s.recurring.push({...rec, id:"r_"+Date.now().toString(36)}); return s; });
+  }
+  function removeRecurring(id){ commit(s=>{ s.recurring = s.recurring.filter(r=>r.id!==id); return s; }); }
+
+  function submitRequest(req){
+    commit(s=>{
+      const responses = {};
+      req.attendees.forEach(a=>{ responses[a] = a===me ? "accepted" : "pending"; });
+      s.requests.push({ ...req, id:"e_"+Date.now().toString(36), status:"pending", createdBy: me, responses });
+      return s;
+    });
+    setShowNewEvent(false);
+    flash("Предложение отправлено");
+  }
+
+  function respond(reqId, answer){
+    commit(s=>{
+      const r = s.requests.find(x=>x.id===reqId);
+      if(!r) return s;
+      r.responses[me] = answer;
+      const vals = Object.values(r.responses);
+      if(vals.every(v=>v==="accepted")){
+        r.status = "confirmed";
+        const slots = slotsForRange(r.startTime, r.duration);
+        r.attendees.forEach(pid=>{
+          slots.forEach(t=>{
+            if(!s.busySlots.some(b=>b.personId===pid && b.date===r.date && b.time===t))
+              s.busySlots.push({id:"b_"+Date.now().toString(36)+Math.random().toString(36).slice(2,5), personId:pid, date:r.date, time:t, type:"event", label:r.title, requestId:r.id});
+          });
+        });
+        if(r.zoomNeeded){
+          slots.forEach(t=>{
+            if(!s.zoomSlots.some(z=>z.date===r.date && z.time===t))
+              s.zoomSlots.push({id:"z_"+Date.now().toString(36)+Math.random().toString(36).slice(2,5), date:r.date, time:t, kind:"event", label:r.title, requestId:r.id});
+          });
+        }
+      } else if(vals.includes("declined")){
+        r.status = "declined";
+      }
+      return s;
+    });
+  }
+
+  const daysInMonth = new Date(viewYM.y, viewYM.m+1, 0).getDate();
+  const firstWeekday = (new Date(viewYM.y, viewYM.m, 1).getDay()+6)%7;
+  const monthCells = useMemo(()=>{
+    const cells = [];
+    for(let i=0;i<firstWeekday;i++) cells.push(null);
+    for(let d=1; d<=daysInMonth; d++) cells.push(dateStr(viewYM.y, viewYM.m, d));
+    return cells;
+  }, [viewYM, daysInMonth, firstWeekday]);
+
+  function dayBadges(ds){
+    const wd = weekdayOfDate(ds);
+    const recCount = state.recurring.filter(r=>r.weekday===wd).length;
+    const busyPeople = new Set();
+    state.busySlots.filter(b=>b.date===ds).forEach(b=>busyPeople.add(b.personId));
+    state.recurring.filter(r=>r.weekday===wd).forEach(r=>{
+      if(r.attendees==="all") state.team.forEach(p=>busyPeople.add(p.id));
+      else (r.attendees||[]).forEach(p=>busyPeople.add(p));
+    });
+    const pending = state.requests.filter(r=>r.date===ds && r.status==="pending").length;
+    return { recCount, busyCount: busyPeople.size, pending };
+  }
+
+  const myInbox = useMemo(()=> state.requests.filter(r => r.attendees.includes(me) && r.responses[me]==="pending" && r.status==="pending"), [state.requests, me]);
+  const myOutbox = useMemo(()=> state.requests.filter(r => r.createdBy===me), [state.requests, me]);
+
+  if(loading){
+    return <div className="flex items-center justify-center h-full min-h-[400px]" style={{color:"var(--ink-soft)"}}>Загрузка…</div>;
+  }
+
+  return (
+    <div className="w-full" style={{ fontFamily:"var(--font-body)", background:"var(--bg)", color:"var(--ink)", minHeight:"100%" }}>
+      <style>{`
+        @import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=Inter:wght@400;500;600&family=IBM+Plex+Mono:wght@500&display=swap');
+        :root{
+          --bg:#F4F5F8; --surface:#FFFFFF; --ink:#1C2333; --ink-soft:#66708A;
+          --border:#E1E5EC; --accent:#4F5FFF; --accent-soft:#EEF0FF;
+          --manual:#E0578A; --recurring:#4F5FFF; --event:#0EA5A0; --zoom:#D97E1B; --dayoff:#9AA3B5;
+          --font-display:'Space Grotesk',sans-serif; --font-body:'Inter',sans-serif; --font-mono:'IBM Plex Mono',monospace;
+        }
+        .disp{ font-family:var(--font-display); }
+        .mono{ font-family:var(--font-mono); }
+        .cell-btn{ transition: transform .08s ease, filter .08s ease; }
+        .cell-btn:hover{ filter:brightness(0.95); }
+        .cell-btn:active{ transform: scale(0.96); }
+        .scrollbar-thin::-webkit-scrollbar{ height:8px; width:8px; }
+        .scrollbar-thin::-webkit-scrollbar-thumb{ background:#D5DAE3; border-radius:4px; }
+      `}</style>
+
+      {toast && (
+        <div className="fixed top-4 left-1/2 -translate-x-1/2 z-50 px-4 py-2 rounded-lg shadow-lg text-sm" style={{background:"var(--ink)", color:"#fff"}}>{toast}</div>
+      )}
+
+      {/* Header */}
+      <div className="flex items-center justify-between px-6 py-4 border-b" style={{borderColor:"var(--border)", background:"var(--surface)"}}>
+        <div className="flex items-center gap-3">
+          <div className="w-9 h-9 rounded-lg flex items-center justify-center" style={{background:"var(--accent)"}}>
+            <CalendarClock size={18} color="#fff" />
+          </div>
+          <div>
+            <div className="disp text-lg font-semibold leading-tight">Кто когда свободен</div>
+            <div className="text-xs" style={{color:"var(--ink-soft)"}}>Общий планировщик команды и Zoom</div>
+          </div>
+        </div>
+        <div className="flex items-center gap-2">
+          <select value={me} onChange={e=>setMe(e.target.value)} className="text-sm px-3 py-2 rounded-lg border outline-none" style={{borderColor:"var(--border)", background:"var(--surface)"}}>
+            <option value="">Я — это…</option>
+            {state.team.map(p=> <option key={p.id} value={p.id}>{p.name}</option>)}
+          </select>
+          <button onClick={()=>setShowInbox(true)} className="relative w-9 h-9 rounded-lg border flex items-center justify-center" style={{borderColor:"var(--border)"}}>
+            <Bell size={16} />
+            {myInbox.length>0 && <span className="absolute -top-1.5 -right-1.5 text-[10px] w-4 h-4 rounded-full flex items-center justify-center text-white" style={{background:"var(--manual)"}}>{myInbox.length}</span>}
+          </button>
+          <button onClick={refresh} className="w-9 h-9 rounded-lg border flex items-center justify-center" style={{borderColor:"var(--border)"}}>
+            <RefreshCw size={15} />
+          </button>
+          <button onClick={()=>setShowNewEvent(true)} className="flex items-center gap-1.5 text-sm px-3.5 py-2 rounded-lg text-white font-medium" style={{background:"var(--accent)"}}>
+            <Plus size={15}/> Предложить созвон
+          </button>
+        </div>
+      </div>
+
+      <div className="flex gap-5 p-5">
+        {/* Sidebar */}
+        <div className="w-64 shrink-0 space-y-4">
+          <div className="rounded-xl border p-3" style={{borderColor:"var(--border)", background:"var(--surface)"}}>
+            <div className="flex items-center justify-between mb-2">
+              <div className="flex items-center gap-1.5 text-sm font-semibold"><Users size={14}/> Команда</div>
+              <button onClick={()=>setShowAddPerson(true)} className="text-xs px-2 py-1 rounded-md" style={{background:"var(--accent-soft)", color:"var(--accent)"}}>+ добавить</button>
+            </div>
+            <div className="space-y-1 max-h-56 overflow-y-auto scrollbar-thin">
+              {state.team.length===0 && <div className="text-xs py-2" style={{color:"var(--ink-soft)"}}>Пока никого нет — добавь первых участников.</div>}
+              {state.team.map(p=>(
+                <div key={p.id} className="flex items-center justify-between group px-1.5 py-1 rounded-md" style={{background: p.id===me ? "var(--accent-soft)" : "transparent"}}>
+                  <div className="flex items-center gap-2 text-sm">
+                    <span className="w-2.5 h-2.5 rounded-full shrink-0" style={{background:p.color}}></span>
+                    {p.name}
+                  </div>
+                  <button onClick={()=>removePerson(p.id)} className="opacity-0 group-hover:opacity-100 text-xs" style={{color:"var(--ink-soft)"}}><Trash2 size={12}/></button>
+                </div>
+              ))}
+            </div>
+          </div>
+
+          <div className="rounded-xl border p-3" style={{borderColor:"var(--border)", background:"var(--surface)"}}>
+            <div className="flex items-center justify-between mb-2">
+              <div className="text-sm font-semibold">Регулярные встречи</div>
+              <button onClick={()=>setShowRecForm(true)} className="text-xs px-2 py-1 rounded-md" style={{background:"var(--accent-soft)", color:"var(--accent)"}}>+ добавить</button>
+            </div>
+            <div className="space-y-1.5 max-h-56 overflow-y-auto scrollbar-thin">
+              {state.recurring.length===0 && <div className="text-xs py-2" style={{color:"var(--ink-soft)"}}>Планёрки и еженедельные созвоны появятся здесь.</div>}
+              {state.recurring.map(r=>(
+                <div key={r.id} className="text-xs px-2 py-1.5 rounded-md flex items-start justify-between gap-1" style={{background:"#F8F9FC"}}>
+                  <div>
+                    <div className="font-medium" style={{color:"var(--recurring)"}}>{r.title}</div>
+                    <div className="mono" style={{color:"var(--ink-soft)"}}>{WEEKDAYS[r.weekday]} {r.startTime} · {r.durationMin} мин {r.zoom ? "· Zoom" : ""}</div>
+                  </div>
+                  <button onClick={()=>removeRecurring(r.id)} style={{color:"var(--ink-soft)"}}><X size={12}/></button>
+                </div>
+              ))}
+            </div>
+          </div>
+
+          <div className="rounded-xl border p-3 text-xs space-y-1.5" style={{borderColor:"var(--border)", background:"var(--surface)"}}>
+            <div className="font-semibold mb-1">Легенда</div>
+            <LegendRow color="var(--manual)" label="Занят(а) вручную"/>
+            <LegendRow color="var(--recurring)" label="Регулярная встреча"/>
+            <LegendRow color="var(--event)" label="Подтверждённый созвон"/>
+            <LegendRow color="var(--dayoff)" label="Нерабочий день"/>
+            <LegendRow color="var(--zoom)" label="Zoom занят"/>
+          </div>
+        </div>
+
+        {/* Main */}
+        <div className="flex-1 min-w-0 space-y-4">
+          {/* Month nav */}
+          <div className="rounded-xl border p-3" style={{borderColor:"var(--border)", background:"var(--surface)"}}>
+            <div className="flex items-center justify-between mb-2 px-1">
+              <button onClick={()=>setViewYM(v=>{ const m=v.m-1; return m<0?{y:v.y-1,m:11}:{y:v.y,m}; })}><ChevronLeft size={18}/></button>
+              <div className="disp font-semibold capitalize">{MONTHS[viewYM.m]} {viewYM.y}</div>
+              <button onClick={()=>setViewYM(v=>{ const m=v.m+1; return m>11?{y:v.y+1,m:0}:{y:v.y,m}; })}><ChevronRight size={18}/></button>
+            </div>
+            <div className="grid grid-cols-7 gap-1 text-center text-[11px] mb-1" style={{color:"var(--ink-soft)"}}>
+              {WEEKDAYS.map(w=><div key={w}>{w}</div>)}
+            </div>
+            <div className="grid grid-cols-7 gap-1">
+              {monthCells.map((ds,i)=>{
+                if(!ds) return <div key={i}></div>;
+                const badges = dayBadges(ds);
+                const isToday = ds===todayStr();
+                const isSel = ds===selectedDate;
+                return (
+                  <button key={ds} onClick={()=>setSelectedDate(ds)} className="cell-btn rounded-lg p-1.5 text-left h-16 border"
+                    style={{borderColor: isSel?"var(--accent)":"var(--border)", background: isSel?"var(--accent-soft)":"var(--surface)"}}>
+                    <div className="text-xs font-medium" style={{color: isToday?"var(--accent)":"var(--ink)"}}>{Number(ds.slice(-2))}</div>
+                    <div className="flex gap-1 mt-1 flex-wrap">
+                      {badges.recCount>0 && <span className="w-1.5 h-1.5 rounded-full" style={{background:"var(--recurring)"}}></span>}
+                      {badges.busyCount>0 && <span className="text-[9px] mono" style={{color:"var(--ink-soft)"}}>{badges.busyCount}чел</span>}
+                      {badges.pending>0 && <span className="w-1.5 h-1.5 rounded-full" style={{background:"var(--manual)"}}></span>}
+                    </div>
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+
+          {/* Day grid */}
+          <div className="rounded-xl border p-4" style={{borderColor:"var(--border)", background:"var(--surface)"}}>
+            <div className="flex items-center justify-between mb-3">
+              <div className="disp font-semibold">{selectedDate} · {WEEKDAYS[weekdayOfDate(selectedDate)]}</div>
+              <button onClick={toggleDayOff} disabled={!me} className="flex items-center gap-1 text-xs px-2.5 py-1.5 rounded-md border disabled:opacity-40" style={{borderColor:"var(--border)"}}>
+                <Ban size={12}/> {state.dayOffs.some(o=>o.personId===me && o.date===selectedDate) ? "Убрать нерабочий день" : "Отметить нерабочий день"}
+              </button>
+            </div>
+            {state.team.length===0 ? (
+              <div className="text-sm py-6 text-center" style={{color:"var(--ink-soft)"}}>Добавь участников команды слева, чтобы увидеть сетку занятости.</div>
+            ) : (
+              <div className="overflow-x-auto scrollbar-thin">
+                <div style={{minWidth: 90 + (state.team.length+1)*84}}>
+                  <div className="flex">
+                    <div style={{width:90}}></div>
+                    {state.team.map(p=>(
+                      <div key={p.id} className="text-xs font-medium text-center px-1 pb-1.5" style={{width:84, color:p.color}}>{p.name}</div>
+                    ))}
+                    <div className="text-xs font-medium text-center px-1 pb-1.5 flex items-center justify-center gap-1" style={{width:84, color:"var(--zoom)"}}><Video size={11}/>Zoom</div>
+                  </div>
+                  {TIME_SLOTS.map(t=>(
+                    <div key={t} className="flex items-center" style={{height:26}}>
+                      <div className="mono text-[10px] pr-2 text-right shrink-0" style={{width:90, color:"var(--ink-soft)"}}>{t.endsWith(":00")?t:""}</div>
+                      {state.team.map(p=>{
+                        const info = isPersonBusyAt(state, p.id, selectedDate, t);
+                        const isMine = p.id===me;
+                        const color = !info.busy ? "transparent" : info.kind==="recurring" ? "var(--recurring)" : info.kind==="event" ? "var(--event)" : info.kind==="dayoff" ? "var(--dayoff)" : "var(--manual)";
+                        return (
+                          <button key={p.id} title={info.busy?info.label:"Свободно"} disabled={!isMine}
+                            onClick={()=>toggleMySlot(selectedDate, t)}
+                            className="cell-btn shrink-0 border-r border-b"
+                            style={{ width:84, height:26, background:color, borderColor:"#EEF0F4", cursor: isMine?"pointer":"default", opacity: !isMine && info.busy ? 0.85 : 1 }}
+                          />
+                        );
+                      })}
+                      {(()=>{ const zi = isZoomBusyAt(state, selectedDate, t); const color = !zi.busy?"transparent": zi.kind==="recurring"?"var(--recurring)": zi.kind==="event"?"var(--event)":"var(--zoom)";
+                        return (
+                          <button title={zi.busy?zi.label:"Zoom свободен"} onClick={()=>toggleZoomSlot(selectedDate, t)}
+                            className="cell-btn shrink-0 border-r border-b" style={{width:84, height:26, background:color, borderColor:"#EEF0F4"}} />
+                        );
+                      })()}
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+            <div className="text-[11px] mt-2" style={{color:"var(--ink-soft)"}}>Клик по своей колонке отмечает/снимает занятость получасовыми блоками. Колонка Zoom открыта для всех.</div>
+          </div>
+        </div>
+      </div>
+
+      {showAddPerson && (
+        <Modal onClose={()=>setShowAddPerson(false)} title="Добавить участника">
+          <input autoFocus value={newPersonName} onChange={e=>setNewPersonName(e.target.value)} onKeyDown={e=>e.key==="Enter" && addPerson(newPersonName)}
+            placeholder="Имя" className="w-full border rounded-lg px-3 py-2 text-sm mb-3" style={{borderColor:"var(--border)"}} />
+          <button onClick={()=>addPerson(newPersonName)} className="w-full py-2 rounded-lg text-white text-sm font-medium" style={{background:"var(--accent)"}}>Добавить</button>
+        </Modal>
+      )}
+
+      {showRecForm && <RecurringForm team={state.team} onClose={()=>setShowRecForm(false)} onSubmit={addRecurring} />}
+
+      {showNewEvent && (
+        <NewEventModal state={state} me={me} selectedDate={selectedDate} onClose={()=>setShowNewEvent(false)} onSubmit={submitRequest} />
+      )}
+
+      {showInbox && (
+        <Modal onClose={()=>setShowInbox(false)} title="Уведомления" wide>
+          <div className="space-y-4">
+            <div>
+              <div className="text-xs font-semibold mb-2" style={{color:"var(--ink-soft)"}}>ЖДУТ ТВОЕГО ОТВЕТА</div>
+              {myInbox.length===0 && <div className="text-sm" style={{color:"var(--ink-soft)"}}>Пусто.</div>}
+              {myInbox.map(r=>(
+                <div key={r.id} className="border rounded-lg p-3 mb-2" style={{borderColor:"var(--border)"}}>
+                  <div className="font-medium text-sm">{r.title}</div>
+                  <div className="mono text-xs mt-0.5" style={{color:"var(--ink-soft)"}}>{r.date} · {r.startTime} · {r.duration} мин {r.zoomNeeded?"· Zoom":""}</div>
+                  <div className="text-xs mt-1" style={{color:"var(--ink-soft)"}}>Участники: {r.attendees.map(a=>personName(state.team,a)).join(", ")}</div>
+                  <div className="flex gap-2 mt-2">
+                    <button onClick={()=>respond(r.id,"accepted")} className="flex items-center gap-1 text-xs px-3 py-1.5 rounded-md text-white" style={{background:"var(--event)"}}><Check size={12}/>Приму участие</button>
+                    <button onClick={()=>respond(r.id,"declined")} className="flex items-center gap-1 text-xs px-3 py-1.5 rounded-md" style={{background:"#FBEAEA", color:"#C43D3D"}}><X size={12}/>Не смогу</button>
+                  </div>
+                </div>
+              ))}
+            </div>
+            <div>
+              <div className="text-xs font-semibold mb-2" style={{color:"var(--ink-soft)"}}>ТВОИ ПРЕДЛОЖЕНИЯ</div>
+              {myOutbox.length===0 && <div className="text-sm" style={{color:"var(--ink-soft)"}}>Пусто.</div>}
+              {myOutbox.map(r=>(
+                <div key={r.id} className="border rounded-lg p-3 mb-2" style={{borderColor:"var(--border)"}}>
+                  <div className="flex items-center justify-between">
+                    <div className="font-medium text-sm">{r.title}</div>
+                    <StatusPill status={r.status} />
+                  </div>
+                  <div className="mono text-xs mt-0.5" style={{color:"var(--ink-soft)"}}>{r.date} · {r.startTime} · {r.duration} мин</div>
+                  <div className="text-xs mt-1" style={{color:"var(--ink-soft)"}}>
+                    {r.attendees.map(a=> `${personName(state.team,a)}: ${r.responses[a]==="accepted"?"✓":r.responses[a]==="declined"?"✗":"…"}`).join("  ")}
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        </Modal>
+      )}
+    </div>
+  );
+}
+
+function LegendRow({color,label}){
+  return <div className="flex items-center gap-2"><span className="w-2.5 h-2.5 rounded-sm shrink-0" style={{background:color}}></span><span style={{color:"var(--ink-soft)"}}>{label}</span></div>;
+}
+function StatusPill({status}){
+  const map = { pending:["Ждём ответов","#F5A524","#FFF6E5"], confirmed:["Подтверждено","#0EA5A0","#E4F7F5"], declined:["Отклонено","#C43D3D","#FBEAEA"] };
+  const [label,color,bg] = map[status]||map.pending;
+  return <span className="text-[10px] px-2 py-0.5 rounded-full font-medium" style={{color,background:bg}}>{label}</span>;
+}
+
+function Modal({title, children, onClose, wide}){
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4" style={{background:"rgba(28,35,51,0.35)"}} onClick={onClose}>
+      <div onClick={e=>e.stopPropagation()} className="rounded-2xl p-5" style={{background:"var(--surface)", width: wide?520:360, maxHeight:"85vh", overflowY:"auto"}}>
+        <div className="flex items-center justify-between mb-3">
+          <div className="disp font-semibold">{title}</div>
+          <button onClick={onClose}><X size={16} color="var(--ink-soft)"/></button>
+        </div>
+        {children}
+      </div>
+    </div>
+  );
+}
+
+function RecurringForm({team, onClose, onSubmit}){
+  const [title,setTitle]=useState("Планёрка");
+  const [weekday,setWeekday]=useState(0);
+  const [startTime,setStartTime]=useState("12:00");
+  const [durationMin,setDurationMin]=useState(60);
+  const [attendMode,setAttendMode]=useState("all");
+  const [picked,setPicked]=useState([]);
+  const [zoom,setZoom]=useState(true);
+  return (
+    <Modal title="Новая регулярная встреча" onClose={onClose}>
+      <div className="space-y-3 text-sm">
+        <div><label className="text-xs" style={{color:"var(--ink-soft)"}}>Название</label>
+          <input value={title} onChange={e=>setTitle(e.target.value)} className="w-full border rounded-lg px-3 py-2 mt-1" style={{borderColor:"var(--border)"}}/></div>
+        <div><label className="text-xs" style={{color:"var(--ink-soft)"}}>День недели</label>
+          <select value={weekday} onChange={e=>setWeekday(Number(e.target.value))} className="w-full border rounded-lg px-3 py-2 mt-1" style={{borderColor:"var(--border)"}}>
+            {WEEKDAYS.map((w,i)=><option key={i} value={i}>{w}</option>)}
+          </select></div>
+        <div className="flex gap-2">
+          <div className="flex-1"><label className="text-xs" style={{color:"var(--ink-soft)"}}>Начало</label>
+            <select value={startTime} onChange={e=>setStartTime(e.target.value)} className="w-full border rounded-lg px-3 py-2 mt-1" style={{borderColor:"var(--border)"}}>
+              {TIME_SLOTS.map(t=><option key={t} value={t}>{t}</option>)}
+            </select></div>
+          <div className="flex-1"><label className="text-xs" style={{color:"var(--ink-soft)"}}>Длительность (мин)</label>
+            <select value={durationMin} onChange={e=>setDurationMin(Number(e.target.value))} className="w-full border rounded-lg px-3 py-2 mt-1" style={{borderColor:"var(--border)"}}>
+              {[30,60,90,120].map(v=><option key={v} value={v}>{v}</option>)}
+            </select></div>
+        </div>
+        <div>
+          <label className="text-xs" style={{color:"var(--ink-soft)"}}>Участники</label>
+          <div className="flex gap-2 mt-1">
+            <button onClick={()=>setAttendMode("all")} className="text-xs px-2.5 py-1.5 rounded-md border" style={{borderColor:"var(--border)", background: attendMode==="all"?"var(--accent-soft)":"transparent"}}>Все</button>
+            <button onClick={()=>setAttendMode("some")} className="text-xs px-2.5 py-1.5 rounded-md border" style={{borderColor:"var(--border)", background: attendMode==="some"?"var(--accent-soft)":"transparent"}}>Выбрать</button>
+          </div>
+          {attendMode==="some" && (
+            <div className="flex flex-wrap gap-1.5 mt-2">
+              {team.map(p=>(
+                <button key={p.id} onClick={()=>setPicked(prev=>prev.includes(p.id)?prev.filter(x=>x!==p.id):[...prev,p.id])}
+                  className="text-xs px-2 py-1 rounded-full border" style={{borderColor: picked.includes(p.id)?p.color:"var(--border)", background: picked.includes(p.id)?p.color+"22":"transparent"}}>{p.name}</button>
+              ))}
+            </div>
+          )}
+        </div>
+        <label className="flex items-center gap-2 text-xs"><input type="checkbox" checked={zoom} onChange={e=>setZoom(e.target.checked)} /> Занимает Zoom</label>
+        <button onClick={()=>onSubmit({title, weekday, startTime, durationMin, attendees: attendMode==="all"?"all":picked, zoom})}
+          className="w-full py-2 rounded-lg text-white text-sm font-medium mt-1" style={{background:"var(--accent)"}}>Сохранить</button>
+      </div>
+    </Modal>
+  );
+}
+
+function NewEventModal({state, me, selectedDate, onClose, onSubmit}){
+  const [title,setTitle]=useState("Созвон");
+  const [date,setDate]=useState(selectedDate);
+  const [startTime,setStartTime]=useState("12:00");
+  const [duration,setDuration]=useState(60);
+  const [attendees,setAttendees]=useState(me?[me]:[]);
+  const [zoomNeeded,setZoomNeeded]=useState(true);
+
+  const covered = slotsForRange(startTime, duration);
+  const preview = state.team.filter(p=>attendees.includes(p.id)).map(p=>{
+    const busy = covered.some(t=>isPersonBusyAt(state,p.id,date,t).busy);
+    return {...p, busy};
+  });
+  const zoomBusy = zoomNeeded && covered.some(t=>isZoomBusyAt(state,date,t).busy);
+
+  return (
+    <Modal title="Предложить созвон" onClose={onClose} wide>
+      <div className="space-y-3 text-sm">
+        <div><label className="text-xs" style={{color:"var(--ink-soft)"}}>Тема</label>
+          <input value={title} onChange={e=>setTitle(e.target.value)} className="w-full border rounded-lg px-3 py-2 mt-1" style={{borderColor:"var(--border)"}}/></div>
+        <div className="flex gap-2">
+          <div className="flex-1"><label className="text-xs" style={{color:"var(--ink-soft)"}}>Дата</label>
+            <input type="date" value={date} onChange={e=>setDate(e.target.value)} className="w-full border rounded-lg px-3 py-2 mt-1" style={{borderColor:"var(--border)"}}/></div>
+          <div className="flex-1"><label className="text-xs" style={{color:"var(--ink-soft)"}}>Начало</label>
+            <select value={startTime} onChange={e=>setStartTime(e.target.value)} className="w-full border rounded-lg px-3 py-2 mt-1" style={{borderColor:"var(--border)"}}>
+              {TIME_SLOTS.map(t=><option key={t} value={t}>{t}</option>)}
+            </select></div>
+          <div className="flex-1"><label className="text-xs" style={{color:"var(--ink-soft)"}}>Длит., мин</label>
+            <select value={duration} onChange={e=>setDuration(Number(e.target.value))} className="w-full border rounded-lg px-3 py-2 mt-1" style={{borderColor:"var(--border)"}}>
+              {[30,60,90,120].map(v=><option key={v} value={v}>{v}</option>)}
+            </select></div>
+        </div>
+        <div>
+          <label className="text-xs" style={{color:"var(--ink-soft)"}}>Участники</label>
+          <div className="flex flex-wrap gap-1.5 mt-1">
+            {state.team.map(p=>(
+              <button key={p.id} onClick={()=>setAttendees(prev=>prev.includes(p.id)?prev.filter(x=>x!==p.id):[...prev,p.id])}
+                className="text-xs px-2 py-1 rounded-full border" style={{borderColor: attendees.includes(p.id)?p.color:"var(--border)", background: attendees.includes(p.id)?p.color+"22":"transparent"}}>{p.name}</button>
+            ))}
+          </div>
+        </div>
+        <label className="flex items-center gap-2 text-xs"><input type="checkbox" checked={zoomNeeded} onChange={e=>setZoomNeeded(e.target.checked)} /> Нужен Zoom</label>
+
+        <div className="rounded-lg p-3" style={{background:"#F8F9FC"}}>
+          <div className="text-xs font-semibold mb-2" style={{color:"var(--ink-soft)"}}>ДОСТУПНОСТЬ НА ВЫБРАННОЕ ВРЕМЯ</div>
+          {preview.length===0 && <div className="text-xs" style={{color:"var(--ink-soft)"}}>Выбери участников.</div>}
+          <div className="flex flex-wrap gap-2">
+            {preview.map(p=>(
+              <span key={p.id} className="text-xs px-2 py-1 rounded-md flex items-center gap-1.5" style={{background: p.busy?"#FBEAEA":"#E4F7EE", color: p.busy?"#C43D3D":"#1E7A46"}}>
+                <span className="w-1.5 h-1.5 rounded-full" style={{background: p.busy?"#C43D3D":"#1E7A46"}}></span>{p.name}
+              </span>
+            ))}
+            {zoomNeeded && (
+              <span className="text-xs px-2 py-1 rounded-md flex items-center gap-1.5" style={{background: zoomBusy?"#FBEAEA":"#E4F7EE", color: zoomBusy?"#C43D3D":"#1E7A46"}}>
+                <Video size={11}/>Zoom
+              </span>
+            )}
+          </div>
+        </div>
+
+        <button disabled={!me || attendees.length===0} onClick={()=>onSubmit({title, date, startTime, duration, attendees, zoomNeeded})}
+          className="w-full py-2 rounded-lg text-white text-sm font-medium disabled:opacity-40" style={{background:"var(--accent)"}}>
+          Отправить предложение
+        </button>
+        {!me && <div className="text-xs text-center" style={{color:"var(--ink-soft)"}}>Выбери сверху, кто ты — чтобы отправить предложение.</div>}
+      </div>
+    </Modal>
+  );
+}
+
+
+const root = ReactDOM.createRoot(document.getElementById("root"));
+root.render(React.createElement(App));
+</script>
+</body>
+</html>
