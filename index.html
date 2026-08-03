@@ -7,6 +7,9 @@
 <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
 <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
 <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=Inter:wght@400;500;600&family=IBM+Plex+Mono:wght@500&display=swap" rel="stylesheet">
 <script src="https://cdn.tailwindcss.com"></script>
 <style>
   html,body,#root{ height:100%; margin:0; }
@@ -277,7 +280,6 @@ function App(){
   return (
     <div className="w-full" style={{ fontFamily:"var(--font-body)", background:"var(--bg)", color:"var(--ink)", minHeight:"100%" }}>
       <style>{`
-        @import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=Inter:wght@400;500;600&family=IBM+Plex+Mono:wght@500&display=swap');
         :root{
           --bg:#F4F5F8; --surface:#FFFFFF; --ink:#1C2333; --ink-soft:#66708A;
           --border:#E1E5EC; --accent:#4F5FFF; --accent-soft:#EEF0FF;
