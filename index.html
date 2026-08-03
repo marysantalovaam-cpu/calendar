@@ -89,14 +89,23 @@ async function loadState() {
 }
 async function saveState(state) {
     try {
-        await fetch(`${DB_URL}/${STORAGE_KEY}.json`, {
+        const res = await fetch(`${DB_URL}/${STORAGE_KEY}.json`, {
             method: "PUT",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify(state)
         });
+        if (!res.ok) {
+            const body = await res.text().catch(() => "");
+            console.error("storage save rejected", res.status, body);
+            window.__schedulerSaveError && window.__schedulerSaveError(`Firebase отклонил запись (${res.status}). Проверь Rules в консоли Firebase.`);
+            return false;
+        }
+        return true;
     }
     catch (e) {
         console.error("storage save failed", e);
+        window.__schedulerSaveError && window.__schedulerSaveError("Не удалось сохранить — проверь адрес DB_URL и подключение к интернету.");
+        return false;
     }
 }
 function personColor(team, id) { const p = team.find(t => t.id === id); return p ? p.color : "#999"; }
@@ -154,6 +163,7 @@ function App() {
     const modalOpenRef = useRef(false);
     useEffect(() => { modalOpenRef.current = modalOpen; }, [modalOpen]);
     function flash(msg) { setToast(msg); setTimeout(() => setToast(""), 2200); }
+    useEffect(() => { window.__schedulerSaveError = (msg) => flash(msg); return () => { window.__schedulerSaveError = null; }; }, []);
     async function commit(mutator) {
         setState(prev => {
             const next = mutator(structuredClone(prev));
