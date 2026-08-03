@@ -26,7 +26,7 @@ const { useState, useEffect, useCallback, useMemo, useRef } = React;
    https://your-project-default-rtdb.europe-west1.firebasedatabase.app
    (без слэша на конце)
    ====================================================================== */
-const DB_URL = "https://calendar-84b06-default-rtdb.europe-west1.firebasedatabase.app/";
+const DB_URL = "https://ВАШ-ПРОЕКТ-default-rtdb.firebaseio.com";
 /* Простые иконки-заглушки без внешних зависимостей (вместо lucide-react) */
 function mkIcon(char) {
     return function Icon({ size = 16, color, className, style, ...rest }) {
@@ -76,8 +76,11 @@ async function loadState() {
     try {
         const res = await fetch(`${DB_URL}/${STORAGE_KEY}.json`);
         const data = await res.json();
+        // Firebase Realtime Database не хранит пустые массивы/объекты — если поле
+        // ни разу не заполнялось, ключ в ответе просто отсутствует. Подстраховываемся
+        // дефолтными значениями, чтобы .filter()/.map() не падали на undefined.
         if (data)
-            return data;
+            return { ...defaultState(), ...data };
     }
     catch (e) {
         console.error("load failed", e);
