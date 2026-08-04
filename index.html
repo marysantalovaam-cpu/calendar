@@ -121,6 +121,7 @@ const END_TIME_SLOTS = (function () { const out = []; for (let h = 8; h <= 23; h
 } return out; })(); // варианты окончания — шире стартовых, чтобы влезали длинные события
 function toMinutes(t) { const [h, m] = t.split(":").map(Number); return h * 60 + m; }
 function minutesBetween(start, end) { const d = toMinutes(end) - toMinutes(start); return d > 0 ? d : 30; }
+function minutesUntil(dateStr, time) { const [h, m] = time.split(":").map(Number); const target = new Date(dateStr + "T" + pad(h) + ":" + pad(m) + ":00"); return (target.getTime() - Date.now()) / 60000; }
 function endTimeFromDuration(start, durMin) { const total = toMinutes(start) + durMin; const h = Math.floor(total / 60), m = total % 60; return `${pad(h)}:${pad(m)}`; }
 function endOptionsAfter(start) { return END_TIME_SLOTS.filter(t => toMinutes(t) > toMinutes(start)); }
 function slotIndex(t) { return TIME_SLOTS.indexOf(t); }
@@ -318,6 +319,37 @@ function App() {
         const lines = todays.map(r => `${r.startTime} — ${r.title} (${r.attendees.map(a => personName(state.team, a)).join(", ")})${r.zoomNeeded && !r.zoomSetupDone ? " ⚠️ нет ссылки на Zoom" : ""}`);
         sendTelegram(`📅 Созвоны на сегодня, ${today}:\n${lines.join("\n")}`);
     }, [loading, me, state.requests, state.team, state.lastReminderDate]);
+    // Напоминание за 10 минут до созвона в Telegram: тегает всех участников и присылает ссылку
+    // на Zoom (если она уже есть). Как и с дневной сводкой, чтобы сообщение не дублировалось,
+    // если у нескольких людей планировщик открыт одновременно, факт отправки помечается прямо на
+    // самой встрече в общей базе (r.tenMinReminded) — как только кто-то один это заметил и
+    // отправил, остальные видят отметку и повторно не шлют.
+    useEffect(() => {
+        if (loading || !me)
+            return;
+        function checkUpcoming() {
+            const today = todayStr();
+            state.requests.forEach(r => {
+                if (r.status !== "confirmed" || r.date !== today || r.tenMinReminded)
+                    return;
+                const mins = minutesUntil(r.date, r.startTime);
+                if (mins <= 10 && mins > -1) {
+                    commit(s => {
+                        const rr = s.requests.find(x => x.id === r.id);
+                        if (rr && !rr.tenMinReminded)
+                            rr.tenMinReminded = true;
+                        return s;
+                    });
+                    const mentions = r.attendees.map(id => tgMention(personName(state.team, id))).join(", ");
+                    const linkLine = r.zoomLink ? `\nZoom: ${r.zoomLink}` : (r.zoomNeeded ? "\n⚠️ ссылки на Zoom пока нет — срочно нужна!" : "");
+                    sendTelegram(`⏰ Через 10 минут: <b>${r.title}</b>\n${r.date} · ${r.startTime}\nУчастники: ${mentions}${linkLine}${r.notes ? `\n${r.notes}` : ""}`);
+                }
+            });
+        }
+        checkUpcoming();
+        const id = setInterval(checkUpcoming, 30000);
+        return () => clearInterval(id);
+    }, [loading, me, state.requests, state.team]);
     function flash(msg) { setToast(msg); setTimeout(() => setToast(""), 2200); }
     useEffect(() => { window.__schedulerSaveError = (msg) => flash(msg); return () => { window.__schedulerSaveError = null; }; }, []);
     async function commit(mutator) {
@@ -494,11 +526,15 @@ function App() {
         setRescheduleSeed(null);
         flash(req.instant ? "Созвон создан и сразу подтверждён" : "Предложение отправлено");
         const mentions = req.attendees.map(id => tgMention(personName(state.team, id))).join(", ");
+        const needsZoomLink = req.zoomNeeded && !(req.zoomLink && req.zoomLink.trim());
+        const zoomAskLine = needsZoomLink
+            ? (state.zoomManagerId ? `\n${tgMention(personName(state.team, state.zoomManagerId))}, нужна ссылка на Zoom для этого созвона.` : "\n⚠️ Нужна ссылка на Zoom, но ответственный за Zoom не назначен.")
+            : "";
         if (req.instant) {
-            sendTelegram(`✅ <b>${req.title}</b>\n${req.date} · ${req.startTime} · ${req.duration} мин\nСоздал(а): ${personName(state.team, me)}\nУчастники: ${mentions}\nСозвон сразу подтверждён.${req.notes ? `\n${req.notes}` : ""}`);
+            sendTelegram(`✅ <b>${req.title}</b>\n${req.date} · ${req.startTime} · ${req.duration} мин\nСоздал(а): ${personName(state.team, me)}\nУчастники: ${mentions}\nСозвон сразу подтверждён.${req.notes ? `\n${req.notes}` : ""}${zoomAskLine}`);
         }
         else {
-            sendTelegram(`🆕 Новый созвон предложен: <b>${req.title}</b>\n${req.date} · ${req.startTime} · ${req.duration} мин\nПредложил(а): ${personName(state.team, me)}\nУчастники: ${mentions}\nПодтвердите участие в планировщике.${req.notes ? `\n${req.notes}` : ""}`);
+            sendTelegram(`🆕 Новый созвон предложен: <b>${req.title}</b>\n${req.date} · ${req.startTime} · ${req.duration} мин\nПредложил(а): ${personName(state.team, me)}\nУчастники: ${mentions}\nПодтвердите участие в планировщике.${req.notes ? `\n${req.notes}` : ""}${zoomAskLine}`);
         }
     }
     function respond(reqId, answer) {
