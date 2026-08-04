@@ -68,7 +68,6 @@ const TELEGRAM_USERNAMES = {
     // "Эльза": "elszaa",
     // "Лера": "valeriaangeny",
 };
-const REMINDER_KEY = "scheduler_last_reminder_date_v1";
 function tgMention(name) {
     const nick = TELEGRAM_USERNAMES[name];
     return nick ? `@${nick}` : name;
@@ -145,7 +144,7 @@ function clearSavedMe() { try {
 }
 catch (e) { } }
 function defaultState() {
-    return { team: [], recurring: [], busySlots: [], dayOffs: [], zoomSlots: [], requests: [], busyEvents: [], zoomManagerId: null, notifications: [] };
+    return { team: [], recurring: [], busySlots: [], dayOffs: [], zoomSlots: [], requests: [], busyEvents: [], zoomManagerId: null, notifications: [], lastReminderDate: null };
 }
 async function loadState() {
     try {
@@ -297,30 +296,28 @@ function App() {
     }, [refresh]);
     useEffect(() => { modalOpenRef.current = modalOpen; }, [modalOpen]);
     // Напоминание о сегодняшних созвонах в Telegram — лучшее, что можно сделать без сервера:
-    // отправляется один раз в день, когда кто-то первым открывает планировщик в этот день.
+    // отправляется РОВНО ОДИН РАЗ В ДЕНЬ на всю команду. Флаг "уже отправлено" хранится в общей
+    // базе (state.lastReminderDate), а не в localStorage каждого браузера — поэтому неважно,
+    // сколько человек и сколько раз откроют планировщик в этот день: сообщение уйдёт один раз,
+    // тому, кто окажется первым, остальные при заходе просто увидят, что день уже обработан.
     // Для гарантированной ежедневной рассылки по расписанию (даже если никто не открыл вкладку)
     // нужен отдельный сервер/облачная функция с cron — это не может сделать статический HTML.
     useEffect(() => {
         if (loading || !me)
             return;
-        let lastSent = "";
-        try {
-            lastSent = localStorage.getItem(REMINDER_KEY) || "";
-        }
-        catch (e) { }
         const today = todayStr();
-        if (lastSent === today)
+        if (state.lastReminderDate === today)
             return;
         const todays = state.requests.filter(r => r.date === today && r.status === "confirmed").sort((a, b) => a.startTime.localeCompare(b.startTime));
+        // Помечаем день как обработанный сразу, ещё до отправки, чтобы другие открытые вкладки
+        // не успели отправить то же самое письмо повторно.
+        commit(s => { if (s.lastReminderDate === today)
+            return s; s.lastReminderDate = today; return s; });
         if (todays.length === 0)
             return;
         const lines = todays.map(r => `${r.startTime} — ${r.title} (${r.attendees.map(a => personName(state.team, a)).join(", ")})${r.zoomNeeded && !r.zoomSetupDone ? " ⚠️ нет ссылки на Zoom" : ""}`);
         sendTelegram(`📅 Созвоны на сегодня, ${today}:\n${lines.join("\n")}`);
-        try {
-            localStorage.setItem(REMINDER_KEY, today);
-        }
-        catch (e) { }
-    }, [loading, me, state.requests, state.team]);
+    }, [loading, me, state.requests, state.team, state.lastReminderDate]);
     function flash(msg) { setToast(msg); setTimeout(() => setToast(""), 2200); }
     useEffect(() => { window.__schedulerSaveError = (msg) => flash(msg); return () => { window.__schedulerSaveError = null; }; }, []);
     async function commit(mutator) {
