@@ -72,6 +72,18 @@ function tgMention(name) {
     const nick = TELEGRAM_USERNAMES[name];
     return nick ? `@${nick}` : name;
 }
+// Эльза отвечает за добавление ссылок на Zoom — если созвону нужен Zoom, а ссылки ещё нет,
+// её тегают в уведомлении с просьбой добавить ссылку. Имя жёстко задано здесь, а не завязано
+// на "★ ответственный за Zoom" в команде, чтобы тег на Эльзу приходил всегда, независимо от
+// того, назначен ли кто-то ответственным в самом приложении.
+const ZOOM_LINK_HELPER_NAME = "Эльза";
+function zoomHelperAskLine(req) {
+    if (!req || !req.zoomNeeded)
+        return "";
+    if (req.zoomLink && req.zoomLink.trim())
+        return "";
+    return `\n${tgMention(ZOOM_LINK_HELPER_NAME)}, нужна ссылка на Zoom для «${req.title}».`;
+}
 async function sendTelegram(text) {
     if (!TELEGRAM_BOT_TOKEN || !TELEGRAM_CHAT_ID) {
         console.warn("Telegram уведомление не отправлено — не заданы TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID", text);
@@ -324,6 +336,12 @@ function App() {
     // если у нескольких людей планировщик открыт одновременно, факт отправки помечается прямо на
     // самой встрече в общей базе (r.tenMinReminded) — как только кто-то один это заметил и
     // отправил, остальные видят отметку и повторно не шлют.
+    // Основное окно отправки — от 10 минут до начала и примерно до начала встречи. Но если в этот
+    // момент вообще ни у кого не было открыто окно планировщика, сообщение может быть отправлено
+    // позже — как только кто-то откроет вкладку (в пределах часа после начала), чтобы напоминание
+    // всё равно дошло, пусть и с опозданием. Полностью гарантировать доставку "минута в минуту"
+    // без открытой вкладки ни у кого статический HTML не может — для этого нужен отдельный сервер
+    // с cron/планировщиком задач.
     useEffect(() => {
         if (loading || !me)
             return;
@@ -333,7 +351,7 @@ function App() {
                 if (r.status !== "confirmed" || r.date !== today || r.tenMinReminded)
                     return;
                 const mins = minutesUntil(r.date, r.startTime);
-                if (mins <= 10 && mins > -1) {
+                if (mins <= 10 && mins > -60) {
                     commit(s => {
                         const rr = s.requests.find(x => x.id === r.id);
                         if (rr && !rr.tenMinReminded)
@@ -341,8 +359,10 @@ function App() {
                         return s;
                     });
                     const mentions = r.attendees.map(id => tgMention(personName(state.team, id))).join(", ");
-                    const linkLine = r.zoomLink ? `\nZoom: ${r.zoomLink}` : (r.zoomNeeded ? "\n⚠️ ссылки на Zoom пока нет — срочно нужна!" : "");
-                    sendTelegram(`⏰ Через 10 минут: <b>${r.title}</b>\n${r.date} · ${r.startTime}\nУчастники: ${mentions}${linkLine}${r.notes ? `\n${r.notes}` : ""}`);
+                    const linkLine = r.zoomLink ? `\nZoom: ${r.zoomLink}` : (r.zoomNeeded ? `\n⚠️ ссылки на Zoom пока нет — срочно нужна!${zoomHelperAskLine(r)}` : "");
+                    const isLate = mins < -1;
+                    const whenLine = isLate ? `⚠️ Уже началось (${Math.abs(Math.round(mins))} мин назад)` : `⏰ Через ${Math.max(0, Math.round(mins))} минут`;
+                    sendTelegram(`${whenLine}: <b>${r.title}</b>\n${r.date} · ${r.startTime}\nУчастники: ${mentions}${linkLine}${r.notes ? `\n${r.notes}` : ""}`);
                 }
             });
         }
@@ -526,10 +546,7 @@ function App() {
         setRescheduleSeed(null);
         flash(req.instant ? "Созвон создан и сразу подтверждён" : "Предложение отправлено");
         const mentions = req.attendees.map(id => tgMention(personName(state.team, id))).join(", ");
-        const needsZoomLink = req.zoomNeeded && !(req.zoomLink && req.zoomLink.trim());
-        const zoomAskLine = needsZoomLink
-            ? (state.zoomManagerId ? `\n${tgMention(personName(state.team, state.zoomManagerId))}, нужна ссылка на Zoom для этого созвона.` : "\n⚠️ Нужна ссылка на Zoom, но ответственный за Zoom не назначен.")
-            : "";
+        const zoomAskLine = zoomHelperAskLine(req);
         if (req.instant) {
             sendTelegram(`✅ <b>${req.title}</b>\n${req.date} · ${req.startTime} · ${req.duration} мин\nСоздал(а): ${personName(state.team, me)}\nУчастники: ${mentions}\nСозвон сразу подтверждён.${req.notes ? `\n${req.notes}` : ""}${zoomAskLine}`);
         }
@@ -582,8 +599,7 @@ function App() {
         else if (outcome && outcome.type === "confirmed") {
             const mentions = outcome.req.attendees.map(id => tgMention(personName(state.team, id))).join(", ");
             if (outcome.req.zoomNeeded && !outcome.req.zoomSetupDone) {
-                const zm = state.zoomManagerId ? tgMention(personName(state.team, state.zoomManagerId)) : "(ответственный за Zoom не назначен)";
-                sendTelegram(`✅ Все подтвердили: <b>${outcome.req.title}</b>\n${outcome.req.date} · ${outcome.req.startTime} · ${outcome.req.duration} мин\nУчастники: ${mentions}\n${zm}, нужна ссылка на Zoom для этого созвона.`);
+                sendTelegram(`✅ Все подтвердили: <b>${outcome.req.title}</b>\n${outcome.req.date} · ${outcome.req.startTime} · ${outcome.req.duration} мин\nУчастники: ${mentions}${zoomHelperAskLine(outcome.req)}`);
             }
             else {
                 sendTelegram(`✅ Все подтвердили: <b>${outcome.req.title}</b>\n${outcome.req.date} · ${outcome.req.startTime} · ${outcome.req.duration} мин\nУчастники: ${mentions}${outcome.req.zoomLink ? `\nZoom: ${outcome.req.zoomLink}` : ""}`);
