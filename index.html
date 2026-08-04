@@ -161,50 +161,73 @@ catch (e) { } }
 function defaultState() {
     return { team: [], recurring: [], busySlots: [], dayOffs: [], zoomSlots: [], requests: [], busyEvents: [], zoomManagerId: null, notifications: [], lastReminderDate: null };
 }
-// ВАЖНО: возвращает { ok, state }, а не просто state. Раньше при любой ошибке чтения
-// (сбой сети, отклонённый запрос и т.п.) функция молча возвращала defaultState() — пустую
-// базу — и вызывающий код не мог отличить "база правда пустая" от "не удалось прочитать".
-// Из-за этого одно неудачное чтение + любое следующее действие пользователя (которое вызывает
-// saveState) приводило к тому, что пустое состояние полностью перезаписывало реальные данные
-// на сервере (saveState делает PUT, то есть полную перезапись, а не слияние). Теперь при ошибке
-// чтения ok=false, и вызывающий код обязан НЕ сохранять поверх — см. коммент у commit().
+// ВАЖНО: возвращает { ok, state, etag }, а не просто state. При любой ошибке чтения
+// (сбой сети, отклонённый запрос и т.п.) функция возвращает ok=false, и вызывающий код
+// обязан НЕ сохранять поверх — см. коммент у commit(). Дополнительно возвращает etag —
+// версию данных на сервере на момент чтения (см. saveState/commit для того, зачем это
+// нужно: условная запись, которая не даёт затереть чужие изменения).
 async function loadState() {
     try {
-        const res = await fetch(`${DB_URL}/${STORAGE_KEY}.json`);
+        const res = await fetch(`${DB_URL}/${STORAGE_KEY}.json`, { headers: { "X-Firebase-ETag": "true" } });
         if (!res.ok) {
             const body = await res.text().catch(() => "");
             console.error("load rejected", res.status, body);
             window.__schedulerSaveError && window.__schedulerSaveError(`Firebase отклонил чтение (${res.status}). Проверь Rules.`);
-            return { ok: false, state: defaultState() };
+            return { ok: false, state: defaultState(), etag: null };
         }
+        const etag = res.headers.get("ETag");
         const data = await res.json();
-        return { ok: true, state: data ? { ...defaultState(), ...data } : defaultState() };
+        return { ok: true, state: data ? { ...defaultState(), ...data } : defaultState(), etag };
     }
     catch (e) {
         console.error("load failed", e);
         window.__schedulerSaveError && window.__schedulerSaveError("Не удалось загрузить данные — проверь DB_URL и интернет-соединение.");
-        return { ok: false, state: defaultState() };
+        return { ok: false, state: defaultState(), etag: null };
     }
 }
-async function saveState(state) {
+// УСЛОВНАЯ ЗАПИСЬ (optimistic concurrency) — защита от того, что старая/фоновая вкладка
+// затрёт свежие данные другого человека. Если передан etag (версия данных на момент, когда
+// эта вкладка последний раз читала базу), запрос идёт с заголовком if-match: Firebase выполнит
+// запись, только если данные на сервере с тех пор не изменились. Если кто-то другой уже успел
+// сохранить свою версию — сервер вернёт 412 (Precondition Failed), и мы НЕ перезаписываем его
+// изменения своими; вызывающий код (commit()) должен подтянуть свежие данные и применить своё
+// действие поверх них заново. Если etag не передан (например, самое первое сохранение в этой
+// вкладке) — пишем безусловно, как раньше.
+async function saveState(state, etag) {
     try {
+        const headers = { "Content-Type": "application/json" };
+        if (etag)
+            headers["if-match"] = etag;
         const res = await fetch(`${DB_URL}/${STORAGE_KEY}.json`, {
             method: "PUT",
-            headers: { "Content-Type": "application/json" },
+            headers,
             body: JSON.stringify(state)
         });
+        if (res.status === 412) {
+            // Это не ошибка сети и не сбой — это ровно та защита, ради которой всё затевалось:
+            // кто-то другой сохранил более свежую версию, пока мы готовили своё изменение.
+            return { ok: false, conflict: true, etag: null };
+        }
         if (!res.ok) {
             const body = await res.text().catch(() => "");
             console.error("storage save rejected", res.status, body);
             window.__schedulerSaveError && window.__schedulerSaveError(`Firebase отклонил запись (${res.status}). Проверь Rules.`);
-            return false;
+            return { ok: false, conflict: false, etag: null };
         }
-        return true;
+        // Забираем etag только что записанных данных, чтобы СЛЕДУЮЩЕЕ сохранение из этой же
+        // вкладки снова было условным (а не безусловным), даже если сервер не вернул ETag в
+        // заголовках самого PUT-ответа (поведение может отличаться в разных окружениях).
+        let newEtag = res.headers.get("ETag");
+        if (!newEtag) {
+            const check = await fetch(`${DB_URL}/${STORAGE_KEY}.json`, { headers: { "X-Firebase-ETag": "true" } }).catch(() => null);
+            newEtag = check && check.ok ? check.headers.get("ETag") : null;
+        }
+        return { ok: true, conflict: false, etag: newEtag };
     }
     catch (e) {
         console.error("storage save failed", e);
         window.__schedulerSaveError && window.__schedulerSaveError("Не удалось сохранить — проверь DB_URL и интернет-соединение.");
-        return false;
+        return { ok: false, conflict: false, etag: null };
     }
 }
 function personColor(team, id) { const p = team.find(t => t.id === id); return p ? p.color : "#999"; }
@@ -296,6 +319,9 @@ function App() {
     // commit() отказывается сохранять что-либо, чтобы неудачное чтение (сбой сети и т.п.)
     // никогда не могло перезаписать реальные данные пустым/устаревшим состоянием.
     const dbSyncedRef = useRef(false);
+    // Версия (ETag) данных на сервере на момент последнего чтения/сохранения в ЭТОЙ вкладке.
+    // Используется для условной записи в saveState — см. комментарий там и в commit().
+    const dbEtagRef = useRef(null);
     // Вход (Gate / добавление себя) — фиксирует настоящую личность и сохраняет её.
     function setMe(id) { setMeRaw(id); setAdminRealId(id); if (id)
         saveMe(id); }
@@ -305,9 +331,10 @@ function App() {
     // хорошим снимком реальных данных) и НЕ выставляем dbSyncedRef, чтобы commit() продолжал
     // блокировать сохранение до следующей удачной синхронизации.
     const refresh = useCallback(async () => {
-        const { ok, state: s } = await loadState();
+        const { ok, state: s, etag } = await loadState();
         if (ok) {
             setState(s);
+            dbEtagRef.current = etag;
             dbSyncedRef.current = true;
         }
         else {
@@ -316,9 +343,10 @@ function App() {
     }, []);
     useEffect(() => {
         (async () => {
-            const { ok, state: s } = await loadState();
+            const { ok, state: s, etag } = await loadState();
             if (ok) {
                 setState(s);
+                dbEtagRef.current = etag;
                 dbSyncedRef.current = true;
                 const saved = getSavedMe();
                 if (saved && s.team.some(p => p.id === saved)) {
@@ -382,7 +410,6 @@ function App() {
     const check = await fetch(path).then(r => r.json()).catch(() => null);
     return check === true;
 }
-
 useEffect(() => {
     if (loading || !me)
         return;
@@ -442,17 +469,42 @@ useEffect(() => {
     // возможности восстановить. Теперь пока синхронизация не подтверждена, интерфейс всё ещё
     // обновляется локально (чтобы не блокировать просмотр), но ничего не улетает на сервер —
     // и как только обновление один раз пройдёт успешно, сохранение снова разрешается.
+    //
+    // ЗАЩИТА ОТ ЗАТИРАНИЯ ЧУЖИХ ИЗМЕНЕНИЙ (старые/фоновые вкладки, несколько людей одновременно):
+    // изменение сначала применяется локально (интерфейс отвечает мгновенно), а сохранение на
+    // сервер идёт УСЛОВНО — только если данные там с последнего чтения этой вкладки не менялись
+    // (dbEtagRef). Если кто-то другой уже сохранил свою версию — сервер отклоняет запись (412),
+    // и вместо того чтобы всё равно затереть его данные своими, мы подтягиваем актуальное
+    // состояние с сервера и применяем ТО ЖЕ САМОЕ действие (тот же mutator) уже поверх него —
+    // так конкретное действие человека (ответить на созвон, добавить личное дело и т.п.)
+    // корректно ложится на самые свежие данные, а не стирает их. Повторяем при необходимости.
+    // Это работает автоматически, без ручного "все обновите страницу".
+    async function persistWithRetry(mutator, base, attempt = 0) {
+        const result = await saveState(base, dbEtagRef.current);
+        if (result.ok) {
+            dbEtagRef.current = result.etag;
+            return;
+        }
+        if (result.conflict && attempt < 4) {
+            const fresh = await loadState();
+            if (fresh.ok) {
+                dbEtagRef.current = fresh.etag;
+                const merged = mutator(structuredClone(fresh.state));
+                setState(merged);
+                return persistWithRetry(mutator, merged, attempt + 1);
+            }
+        }
+        flash("Не удалось сохранить изменение — попробуй ещё раз или обнови страницу.");
+    }
     async function commit(mutator) {
         if (!dbSyncedRef.current) {
             flash("Нет связи с базой данных — это изменение НЕ сохранится. Обнови страницу.");
             setState(prev => mutator(structuredClone(prev)));
             return;
         }
-        setState(prev => {
-            const next = mutator(structuredClone(prev));
-            saveState(next);
-            return next;
-        });
+        let localNext;
+        setState(prev => { localNext = mutator(structuredClone(prev)); return localNext; });
+        await persistWithRetry(mutator, localNext);
     }
     function addPerson(name) {
         if (!name.trim())
