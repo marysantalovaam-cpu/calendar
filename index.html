@@ -39,6 +39,7 @@ const X = mkIcon("✕");
 const Check = mkIcon("✓");
 const Bell = mkIcon("🔔");
 const RefreshCw = mkIcon("⟳");
+const Download = mkIcon("⬇");
 const Video = mkIcon("🎥");
 const Trash2 = mkIcon("🗑");
 const Users = mkIcon("👥");
@@ -159,6 +160,13 @@ catch (e) { } }
 function defaultState() {
     return { team: [], recurring: [], busySlots: [], dayOffs: [], zoomSlots: [], requests: [], busyEvents: [], zoomManagerId: null, notifications: [], lastReminderDate: null };
 }
+// ВАЖНО: возвращает { ok, state }, а не просто state. Раньше при любой ошибке чтения
+// (сбой сети, отклонённый запрос и т.п.) функция молча возвращала defaultState() — пустую
+// базу — и вызывающий код не мог отличить "база правда пустая" от "не удалось прочитать".
+// Из-за этого одно неудачное чтение + любое следующее действие пользователя (которое вызывает
+// saveState) приводило к тому, что пустое состояние полностью перезаписывало реальные данные
+// на сервере (saveState делает PUT, то есть полную перезапись, а не слияние). Теперь при ошибке
+// чтения ok=false, и вызывающий код обязан НЕ сохранять поверх — см. коммент у commit().
 async function loadState() {
     try {
         const res = await fetch(`${DB_URL}/${STORAGE_KEY}.json`);
@@ -166,17 +174,16 @@ async function loadState() {
             const body = await res.text().catch(() => "");
             console.error("load rejected", res.status, body);
             window.__schedulerSaveError && window.__schedulerSaveError(`Firebase отклонил чтение (${res.status}). Проверь Rules.`);
-            return defaultState();
+            return { ok: false, state: defaultState() };
         }
         const data = await res.json();
-        if (data)
-            return { ...defaultState(), ...data };
+        return { ok: true, state: data ? { ...defaultState(), ...data } : defaultState() };
     }
     catch (e) {
         console.error("load failed", e);
         window.__schedulerSaveError && window.__schedulerSaveError("Не удалось загрузить данные — проверь DB_URL и интернет-соединение.");
+        return { ok: false, state: defaultState() };
     }
-    return defaultState();
 }
 async function saveState(state) {
     try {
@@ -284,20 +291,39 @@ function App() {
     const modalOpen = showNewEvent || showInbox || showAddPerson || showRecForm || !!creatingSlot || !!viewingSlot || !!editingEvent || showAllMeetings || !!editingRequest || !!editingRecurring;
     const pollRef = useRef(null);
     const modalOpenRef = useRef(false);
+    // true только после хотя бы одной УСПЕШНОЙ загрузки состояния с сервера. Пока false —
+    // commit() отказывается сохранять что-либо, чтобы неудачное чтение (сбой сети и т.п.)
+    // никогда не могло перезаписать реальные данные пустым/устаревшим состоянием.
+    const dbSyncedRef = useRef(false);
     // Вход (Gate / добавление себя) — фиксирует настоящую личность и сохраняет её.
     function setMe(id) { setMeRaw(id); setAdminRealId(id); if (id)
         saveMe(id); }
     // Переключение "смотрю как ..." — только для админа, сессионно, не трогает сохранённую настоящую личность.
     function switchIdentity(id) { setMeRaw(id); }
-    const refresh = useCallback(async () => { const s = await loadState(); setState(s); }, []);
+    // Если чтение не удалось — НЕ трогаем текущее состояние в памяти (оно может быть последним
+    // хорошим снимком реальных данных) и НЕ выставляем dbSyncedRef, чтобы commit() продолжал
+    // блокировать сохранение до следующей удачной синхронизации.
+    const refresh = useCallback(async () => {
+        const { ok, state: s } = await loadState();
+        if (ok) {
+            setState(s);
+            dbSyncedRef.current = true;
+        }
+        else {
+            flash("Не удалось обновить данные с сервера — показаны последние загруженные. Изменения пока не будут сохраняться.");
+        }
+    }, []);
     useEffect(() => {
         (async () => {
-            const s = await loadState();
-            setState(s);
-            const saved = getSavedMe();
-            if (saved && s.team.some(p => p.id === saved)) {
-                setMeRaw(saved);
-                setAdminRealId(saved);
+            const { ok, state: s } = await loadState();
+            if (ok) {
+                setState(s);
+                dbSyncedRef.current = true;
+                const saved = getSavedMe();
+                if (saved && s.team.some(p => p.id === saved)) {
+                    setMeRaw(saved);
+                    setAdminRealId(saved);
+                }
             }
             setLoading(false);
         })();
@@ -371,8 +397,39 @@ function App() {
         return () => clearInterval(id);
     }, [loading, me, state.requests, state.team]);
     function flash(msg) { setToast(msg); setTimeout(() => setToast(""), 2200); }
+    // Ручная резервная копия — скачивает текущее состояние (то, что видно в интерфейсе прямо
+    // сейчас) в JSON-файл. Полезно сделать перед любыми рискованными изменениями или просто
+    // время от времени — если когда-нибудь база снова окажется пустой, у тебя будет файл,
+    // из которого можно вручную восстановить данные (структура совпадает с тем, что лежит в
+    // Firebase по адресу ${DB_URL}/scheduler-v1.json).
+    function exportBackup() {
+        const blob = new Blob([JSON.stringify(state, null, 2)], { type: "application/json" });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = `scheduler-backup-${todayStr()}.json`;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+        flash("Резервная копия скачана");
+    }
     useEffect(() => { window.__schedulerSaveError = (msg) => flash(msg); return () => { window.__schedulerSaveError = null; }; }, []);
+    // ЗАЩИТА ОТ ЗАТИРАНИЯ БАЗЫ: если ещё не было ни одной успешной загрузки состояния с сервера
+    // в этой вкладке (dbSyncedRef.current === false) — saveState() ЗАПРЕЩЕНО вызывать. Раньше
+    // при сбое чтения (сеть моргнула, Firebase на секунду не ответил и т.п.) состояние в памяти
+    // оставалось пустым по умолчанию, а следующее же действие пользователя (клик, ответ на
+    // приглашение — что угодно) сохраняло это пустое состояние поверх настоящей базы (saveState
+    // делает полный PUT, то есть замену целиком, а не слияние) — и все данные стирались без
+    // возможности восстановить. Теперь пока синхронизация не подтверждена, интерфейс всё ещё
+    // обновляется локально (чтобы не блокировать просмотр), но ничего не улетает на сервер —
+    // и как только обновление один раз пройдёт успешно, сохранение снова разрешается.
     async function commit(mutator) {
+        if (!dbSyncedRef.current) {
+            flash("Нет связи с базой данных — это изменение НЕ сохранится. Обнови страницу.");
+            setState(prev => mutator(structuredClone(prev)));
+            return;
+        }
         setState(prev => {
             const next = mutator(structuredClone(prev));
             saveState(next);
@@ -687,7 +744,7 @@ function App() {
         ? React.createElement("div", { className: "flex items-center gap-1.5" }, React.createElement("select", { value: me, onChange: e => switchIdentity(e.target.value), title: "Ты — админ (Маша): можешь смотреть календарь как любой другой человек", className: "text-sm px-3 py-2 rounded-lg border outline-none", style: { borderColor: "var(--accent)", background: "var(--accent-soft)" } }, state.team.map(p => React.createElement("option", { key: p.id, value: p.id }, p.name))), me !== adminRealId ? React.createElement("button", { onClick: () => switchIdentity(adminRealId), className: "text-xs px-2 py-1.5 rounded-md border", style: { borderColor: "var(--border)", color: "var(--ink-soft)" } }, "Вернуться к себе") : null)
         : React.createElement("div", { className: "text-sm px-3 py-2 rounded-lg border flex items-center gap-1.5", style: { borderColor: "var(--border)", color: "var(--ink-soft)" } }, React.createElement("span", { className: "w-2 h-2 rounded-full shrink-0", style: { background: personColor(state.team, me) } }), personName(state.team, me));
     const notifCount = myInbox.length + myZoomTasks.length + myCancelNotices.length;
-    const headerEl = React.createElement("div", { className: "flex flex-wrap items-center justify-between gap-2 px-3 sm:px-6 py-3 sm:py-4 border-b", style: { borderColor: "var(--border)", background: "var(--surface)" } }, React.createElement("div", { className: "flex items-center gap-2 sm:gap-3" }, React.createElement("div", { className: "w-8 h-8 sm:w-9 sm:h-9 rounded-lg flex items-center justify-center shrink-0", style: { background: "var(--accent)" } }, React.createElement(CalendarClock, { size: 18, color: "#fff" })), React.createElement("div", null, React.createElement("div", { className: "disp text-base sm:text-lg font-semibold leading-tight" }, "Кто когда свободен"), React.createElement("div", { className: "text-xs hidden sm:block", style: { color: "var(--ink-soft)" } }, "Общий планировщик команды и Zoom"))), React.createElement("div", { className: "flex flex-wrap items-center gap-1.5 sm:gap-2" }, identityEl, React.createElement("button", { onClick: () => setShowAllMeetings(true), className: "text-xs px-2.5 sm:px-3 py-2 rounded-lg border", style: { borderColor: "var(--border)", color: "var(--ink-soft)" } }, "Все созвоны"), React.createElement("button", { onClick: () => setShowInbox(true), className: "relative w-9 h-9 rounded-lg border flex items-center justify-center shrink-0", style: { borderColor: "var(--border)" } }, React.createElement(Bell, { size: 16 }), notifCount > 0 ? React.createElement("span", { className: "absolute -top-1.5 -right-1.5 text-[10px] w-4 h-4 rounded-full flex items-center justify-center text-white", style: { background: "var(--manual)" } }, notifCount) : null), React.createElement("button", { onClick: refresh, className: "w-9 h-9 rounded-lg border flex items-center justify-center shrink-0", style: { borderColor: "var(--border)" } }, React.createElement(RefreshCw, { size: 15 })), React.createElement("button", { onClick: () => { setRescheduleSeed(null); setShowNewEvent(true); }, className: "flex items-center gap-1.5 text-xs sm:text-sm px-3 sm:px-3.5 py-2 rounded-lg text-white font-medium", style: { background: "var(--accent)" } }, React.createElement(Plus, { size: 15 }), " Предложить созвон")));
+    const headerEl = React.createElement("div", { className: "flex flex-wrap items-center justify-between gap-2 px-3 sm:px-6 py-3 sm:py-4 border-b", style: { borderColor: "var(--border)", background: "var(--surface)" } }, React.createElement("div", { className: "flex items-center gap-2 sm:gap-3" }, React.createElement("div", { className: "w-8 h-8 sm:w-9 sm:h-9 rounded-lg flex items-center justify-center shrink-0", style: { background: "var(--accent)" } }, React.createElement(CalendarClock, { size: 18, color: "#fff" })), React.createElement("div", null, React.createElement("div", { className: "disp text-base sm:text-lg font-semibold leading-tight" }, "Кто когда свободен"), React.createElement("div", { className: "text-xs hidden sm:block", style: { color: "var(--ink-soft)" } }, "Общий планировщик команды и Zoom"))), React.createElement("div", { className: "flex flex-wrap items-center gap-1.5 sm:gap-2" }, identityEl, React.createElement("button", { onClick: () => setShowAllMeetings(true), className: "text-xs px-2.5 sm:px-3 py-2 rounded-lg border", style: { borderColor: "var(--border)", color: "var(--ink-soft)" } }, "Все созвоны"), React.createElement("button", { onClick: () => setShowInbox(true), className: "relative w-9 h-9 rounded-lg border flex items-center justify-center shrink-0", style: { borderColor: "var(--border)" } }, React.createElement(Bell, { size: 16 }), notifCount > 0 ? React.createElement("span", { className: "absolute -top-1.5 -right-1.5 text-[10px] w-4 h-4 rounded-full flex items-center justify-center text-white", style: { background: "var(--manual)" } }, notifCount) : null), React.createElement("button", { onClick: refresh, className: "w-9 h-9 rounded-lg border flex items-center justify-center shrink-0", style: { borderColor: "var(--border)" } }, React.createElement(RefreshCw, { size: 15 })), React.createElement("button", { onClick: exportBackup, title: "Скачать резервную копию всех данных в JSON", className: "w-9 h-9 rounded-lg border flex items-center justify-center shrink-0", style: { borderColor: "var(--border)" } }, React.createElement(Download, { size: 15 })), React.createElement("button", { onClick: () => { setRescheduleSeed(null); setShowNewEvent(true); }, className: "flex items-center gap-1.5 text-xs sm:text-sm px-3 sm:px-3.5 py-2 rounded-lg text-white font-medium", style: { background: "var(--accent)" } }, React.createElement(Plus, { size: 15 }), " Предложить созвон")));
     const teamCardEl = React.createElement("div", { className: "rounded-xl border p-3", style: { borderColor: "var(--border)", background: "var(--surface)" } }, React.createElement("div", { className: "flex items-center justify-between mb-2" }, React.createElement("div", { className: "flex items-center gap-1.5 text-sm font-semibold" }, React.createElement(Users, { size: 14 }), " Команда"), React.createElement("button", { onClick: () => setShowAddPerson(true), className: "text-xs px-2 py-1 rounded-md", style: { background: "var(--accent-soft)", color: "var(--accent)" } }, "+ добавить")), React.createElement("div", { className: "grid grid-cols-2 gap-1.5" }, state.team.length === 0 ? React.createElement("div", { className: "text-xs py-2 col-span-2", style: { color: "var(--ink-soft)" } }, "Пока никого нет — добавь первых участников.") : null, state.team.map(p => React.createElement("div", { key: p.id, className: "tile-btn group rounded-lg px-2 py-1.5 border", style: { borderColor: p.id === me ? "var(--accent)" : "var(--border)", background: p.id === me ? "var(--accent-soft)" : "var(--surface)" } }, React.createElement("div", { className: "flex items-center gap-1.5 text-xs font-medium truncate" }, React.createElement("span", { className: "w-2 h-2 rounded-full shrink-0", style: { background: p.color } }), React.createElement("span", { className: "truncate" }, p.name), state.zoomManagerId === p.id ? React.createElement("span", { title: "Отвечает за настройку Zoom", style: { color: "var(--zoom)" } }, "★") : null, p.core ? React.createElement("span", { title: "Основная управленческая группа", style: { color: "var(--accent)" } }, "◆") : null), React.createElement("div", { className: "flex items-center gap-2 mt-1 opacity-0 group-hover:opacity-100" }, React.createElement("button", { onClick: () => setZoomManager(p.id), title: "Ответственный за Zoom", className: "text-[10px]", style: { color: state.zoomManagerId === p.id ? "var(--zoom)" : "var(--ink-soft)" } }, "★ Zoom"), React.createElement("button", { onClick: () => toggleCoreMember(p.id), title: "Основная команда", className: "text-[10px]", style: { color: p.core ? "var(--accent)" : "var(--ink-soft)" } }, "◆ группа"), React.createElement("button", { onClick: () => removePerson(p.id), className: "text-[10px] ml-auto", style: { color: "var(--ink-soft)" } }, React.createElement(Trash2, { size: 11 })))))));
     const recurringCardEl = React.createElement("div", { className: "rounded-xl border p-3", style: { borderColor: "var(--border)", background: "var(--surface)" } }, React.createElement("div", { className: "flex items-center justify-between mb-2" }, React.createElement("div", { className: "text-sm font-semibold" }, "Регулярные встречи"), React.createElement("button", { onClick: () => setShowRecForm(true), className: "text-xs px-2 py-1 rounded-md", style: { background: "var(--accent-soft)", color: "var(--accent)" } }, "+ добавить")), React.createElement("div", { className: "space-y-1.5 max-h-56 overflow-y-auto scrollbar-thin" }, state.recurring.length === 0 ? React.createElement("div", { className: "text-xs py-2", style: { color: "var(--ink-soft)" } }, "Планёрки и еженедельные созвоны появятся здесь.") : null, state.recurring.map(r => React.createElement("div", { key: r.id, className: "text-xs px-2 py-1.5 rounded-md flex items-start justify-between gap-1", style: { background: "#F8F9FC" } }, React.createElement("div", null, React.createElement("div", { className: "font-medium", style: { color: "var(--recurring)" } }, r.title), React.createElement("div", { className: "mono", style: { color: "var(--ink-soft)" } }, `${WEEKDAYS[r.weekday]} ${r.startTime} · ${r.durationMin} мин ${r.zoom ? "· Zoom" : ""}`)), React.createElement("div", { className: "flex items-center gap-1 shrink-0" }, React.createElement("button", { onClick: () => setEditingRecurring(r), style: { color: "var(--ink-soft)" } }, React.createElement(Pencil, { size: 12 })), React.createElement("button", { onClick: () => removeRecurring(r.id), style: { color: "var(--ink-soft)" } }, React.createElement(X, { size: 12 })))))));
     const legendCardEl = React.createElement("div", { className: "rounded-xl border p-3 text-xs space-y-1.5", style: { borderColor: "var(--border)", background: "var(--surface)" } }, React.createElement("div", { className: "font-semibold mb-1" }, "Легенда"), React.createElement(LegendRow, { color: "var(--manual)", label: "Личное событие (клик, чтобы посмотреть)" }), React.createElement(LegendRow, { color: "var(--recurring)", label: "Регулярная встреча" }), React.createElement(LegendRow, { color: "var(--event)", label: "Подтверждённый созвон" }), React.createElement("div", { className: "flex items-center gap-2" }, React.createElement("span", { className: "w-2.5 h-2.5 rounded-sm shrink-0", style: { border: "2px dashed var(--pending)", boxSizing: "border-box" } }), React.createElement("span", { style: { color: "var(--ink-soft)" } }, "Созвон предложен, ждёт подтверждения (пунктир)")), React.createElement(LegendRow, { color: "var(--dayoff)", label: "🚫 Нерабочий день" }), React.createElement(LegendRow, { color: "var(--vacation)", label: "🏖️ Отпуск" }), React.createElement(LegendRow, { color: "var(--sick)", label: "🤒 Болею" }), React.createElement(LegendRow, { color: "var(--zoom)", label: "Zoom занят (подтверждено)" }), React.createElement("div", { className: "flex items-center gap-2" }, React.createElement("span", { className: "w-2.5 h-2.5 rounded-sm shrink-0", style: { border: "2px dashed var(--zoom)", background: "var(--zoom-pending)", boxSizing: "border-box" } }), React.createElement("span", { style: { color: "var(--ink-soft)" } }, "Zoom запланирован, но созвон ещё не подтверждён")), React.createElement("div", { className: "pt-1", style: { color: "var(--ink-soft)" } }, "★ у имени в команде — кто отвечает за настройку Zoom."), React.createElement("div", null, "◆ у имени в команде — входит в основную управленческую группу."), React.createElement("div", { className: "pt-1" }, "Полоска под числом в календаре — загруженность Zoom в этот день: зелёная = свободно, оранжевая = частично, красная = почти весь день занят."));
