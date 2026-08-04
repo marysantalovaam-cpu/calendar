@@ -368,16 +368,32 @@ function App() {
     // всё равно дошло, пусть и с опозданием. Полностью гарантировать доставку "минута в минуту"
     // без открытой вкладки ни у кого статический HTML не может — для этого нужен отдельный сервер
     // с cron/планировщиком задач.
-    useEffect(() => {
-        if (loading || !me)
-            return;
-        function checkUpcoming() {
-            const today = todayStr();
-            state.requests.forEach(r => {
-                if (r.status !== "confirmed" || r.date !== today || r.tenMinReminded)
-                    return;
-                const mins = minutesUntil(r.date, r.startTime);
-                if (mins <= 10 && mins > -60) {
+    async function claimReminder(reqId) {
+    const path = `${DB_URL}/reminderClaims/${reqId}.json`;
+    const existing = await fetch(path).then(r => r.json()).catch(() => null);
+    if (existing) return false;
+    const putRes = await fetch(path, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(true)
+    });
+    if (!putRes.ok) return false;
+    const check = await fetch(path).then(r => r.json()).catch(() => null);
+    return check === true;
+}
+
+useEffect(() => {
+    if (loading || !me)
+        return;
+    function checkUpcoming() {
+        const today = todayStr();
+        state.requests.forEach(r => {
+            if (r.status !== "confirmed" || r.date !== today || r.tenMinReminded)
+                return;
+            const mins = minutesUntil(r.date, r.startTime);
+            if (mins <= 10 && mins > -60) {
+                claimReminder(r.id).then(won => {
+                    if (!won) return;
                     commit(s => {
                         const rr = s.requests.find(x => x.id === r.id);
                         if (rr && !rr.tenMinReminded)
@@ -389,13 +405,14 @@ function App() {
                     const isLate = mins < -1;
                     const whenLine = isLate ? `⚠️ Уже началось (${Math.abs(Math.round(mins))} мин назад)` : `⏰ Через ${Math.max(0, Math.round(mins))} минут`;
                     sendTelegram(`${whenLine}: <b>${r.title}</b>\n${r.date} · ${r.startTime}\nУчастники: ${mentions}${linkLine}${r.notes ? `\n${r.notes}` : ""}`);
-                }
-            });
-        }
-        checkUpcoming();
-        const id = setInterval(checkUpcoming, 30000);
-        return () => clearInterval(id);
-    }, [loading, me, state.requests, state.team]);
+                });
+            }
+        });
+    }
+    checkUpcoming();
+    const id = setInterval(checkUpcoming, 30000);
+    return () => clearInterval(id);
+}, [loading, me, state.requests, state.team]);
     function flash(msg) { setToast(msg); setTimeout(() => setToast(""), 2200); }
     // Ручная резервная копия — скачивает текущее состояние (то, что видно в интерфейсе прямо
     // сейчас) в JSON-файл. Полезно сделать перед любыми рискованными изменениями или просто
