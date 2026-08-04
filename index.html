@@ -243,9 +243,13 @@ function getOccupant(state, personId, date, time) {
         return { kind: "dayoff", label: `${t.emoji} ${t.label}`, ownerId: personId, offType: off.type || "off" };
     }
     const rec = state.recurring.find(r => {
-        if (r.weekday !== wd)
-            return false;
-        const inAttendees = r.attendees === "all"
+    if (r.weekday !== wd)
+        return false;
+    if (r.until && date >= r.until)
+        return false;
+    if (Array.isArray(r.excludedDates) && r.excludedDates.includes(date))
+        return false;
+    const inAttendees = r.attendees === "all"
             || (r.attendees === "core" && state.team.some(p => p.id === personId && p.core))
             || (Array.isArray(r.attendees) && r.attendees.includes(personId));
         if (!inAttendees)
@@ -275,8 +279,10 @@ function isPersonBusyAt(state, personId, date, time) {
 }
 function isZoomBusyAt(state, date, time) {
     const wd = weekdayOfDate(date);
-    const rec = state.recurring.find(r => r.weekday === wd && r.zoom && slotsForRange(r.startTime, r.durationMin).includes(time));
-    if (rec)
+    const rec = state.recurring.find(r => r.weekday === wd && r.zoom
+        && !(r.until && date >= r.until)
+        && !(Array.isArray(r.excludedDates) && r.excludedDates.includes(date))
+        && slotsForRange(r.startTime, r.durationMin).includes(time));    if (rec)
         return { busy: true, kind: "recurring", label: rec.title };
     const z = state.zoomSlots.find(s => s.date === date && s.time === time);
     if (z)
@@ -572,8 +578,24 @@ useEffect(() => {
     function addRecurring(rec) { commit(s => { s.recurring.push({ ...rec, id: "r_" + Date.now().toString(36) }); return s; }); }
     function updateRecurring(id, rec) { commit(s => { const idx = s.recurring.findIndex(r => r.id === id); if (idx >= 0)
         s.recurring[idx] = { ...rec, id }; return s; }); }
-    function removeRecurring(id) { commit(s => { s.recurring = s.recurring.filter(r => r.id !== id); return s; }); }
-    function updateRequestDetails(id, payload) {
+function removeRecurring(id) { commit(s => { s.recurring = s.recurring.filter(r => r.id !== id); return s; }); }
+
+// ДОБАВИТЬ:
+function deleteRecurringOccurrence(id, date) {
+    commit(s => {
+        const r = s.recurring.find(x => x.id === id);
+        if (r) r.excludedDates = Array.isArray(r.excludedDates) ? [...r.excludedDates, date] : [date];
+        return s;
+    });
+}
+function deleteRecurringFromDate(id, date) {
+    commit(s => {
+        const r = s.recurring.find(x => x.id === id);
+        if (r) r.until = date; // "until" исключает date и все более поздние даты
+        return s;
+    });
+}
+  function updateRequestDetails(id, payload) {
         commit(s => {
             const r = s.requests.find(x => x.id === id);
             if (!r)
@@ -763,8 +785,10 @@ useEffect(() => {
     }, [viewYM, daysInMonth, firstWeekday]);
     function dayBadges(ds) {
         const wd = weekdayOfDate(ds);
-        const recCount = state.recurring.filter(r => r.weekday === wd).length;
-        const pending = state.requests.filter(r => r.date === ds && r.status === "pending").length;
+const recCount = state.recurring.filter(r => r.weekday === wd
+    && !(r.until && ds >= r.until)
+    && !(Array.isArray(r.excludedDates) && r.excludedDates.includes(ds))).length;
+      const pending = state.requests.filter(r => r.date === ds && r.status === "pending").length;
         const vacationCount = state.dayOffs.filter(o => o.date === ds && o.type === "vacation").length;
         const sickCount = state.dayOffs.filter(o => o.date === ds && o.type === "sick").length;
         const zoomLoad = zoomLoadForDay(state, ds);
@@ -902,11 +926,19 @@ useEffect(() => {
             deleteRequest(id);
             setViewingSlot(null);
         } },
-        onEditRecurring: (rec) => { setViewingSlot(null); setEditingRecurring(rec); },
-        onDeleteRecurring: (id) => { if (confirm("Удалить эту регулярную встречу?")) {
-            removeRecurring(id);
-            setViewingSlot(null);
-        } }
+onEditRecurring: (rec) => { setViewingSlot(null); setEditingRecurring(rec); },
+onDeleteRecurringOccurrence: (rec, date) => {
+    if (confirm(`Удалить «${rec.title}» только на ${date}?`)) {
+        deleteRecurringOccurrence(rec.id, date);
+        setViewingSlot(null);
+    }
+},
+onDeleteRecurringFromDate: (rec, date) => {
+    if (confirm(`Удалить «${rec.title}» на ${date} и все последующие повторения?`)) {
+        deleteRecurringFromDate(rec.id, date);
+        setViewingSlot(null);
+    }
+}
     }) : null;
     const zoomLinkRow = (link) => link ? React.createElement("a", { href: link, target: "_blank", rel: "noreferrer", className: "text-xs mt-1 flex items-center gap-1 underline", style: { color: "var(--accent)" } }, React.createElement(Video, { size: 10 }), link) : null;
     const notesRow = (notes) => notes ? React.createElement("div", { className: "text-xs mt-1 px-2 py-1 rounded", style: { background: "#F8F9FC", color: "var(--ink)" } }, notes) : null;
@@ -1046,15 +1078,23 @@ function EventFormModal({ team, me, date, time, existing, onClose, onSubmit }) {
         className: "w-full border rounded-lg px-3 py-2 mt-1 text-sm", style: { borderColor: "var(--border)", resize: "vertical" } })), React.createElement("button", { onClick: submit, className: "w-full py-2 rounded-lg text-white text-sm font-medium mt-1", style: { background: "var(--accent)" } }, existing ? "Сохранить изменения" : "Создать")));
 }
 /* Просмотр того, что занимает ячейку */
-function ViewOccupantModal({ team, me, isAdmin, slot, onClose, onEdit, onDelete, onRemoveDayOff, onRespond, onEditRequest, onDeleteRequest, onEditRecurring, onDeleteRecurring }) {
-    const { personId, date, occ } = slot;
+// СТАЛО
+function ViewOccupantModal({ team, me, isAdmin, slot, onClose, onEdit, onDelete, onRemoveDayOff, onRespond, onEditRequest, onDeleteRequest, onEditRecurring, onDeleteRecurringOccurrence, onDeleteRecurringFromDate }) {    const { personId, date, occ } = slot;
     const personLabel = personName(team, personId);
     let body = null;
     let title = "Что здесь запланировано";
     if (occ.kind === "recurring") {
         title = occ.recurring.title;
-        body = React.createElement("div", { className: "text-sm space-y-2" }, React.createElement("div", null, `${WEEKDAYS[occ.recurring.weekday]}, ${occ.recurring.startTime} · ${occ.recurring.durationMin} мин`), occ.recurring.notes ? React.createElement("div", { className: "text-xs px-2 py-1.5 rounded", style: { background: "#F8F9FC", color: "var(--ink)" } }, occ.recurring.notes) : null, React.createElement("div", { className: "text-xs", style: { color: "var(--ink-soft)" } }, "Регулярная встреча."), React.createElement("div", { className: "flex gap-2 pt-1" }, React.createElement("button", { onClick: () => onEditRecurring(occ.recurring), className: "flex items-center gap-1 text-xs px-3 py-1.5 rounded-md", style: { background: "var(--accent-soft)", color: "var(--accent)" } }, React.createElement(Pencil, { size: 11 }), "Редактировать"), React.createElement("button", { onClick: () => onDeleteRecurring(occ.recurring.id), className: "flex items-center gap-1 text-xs px-3 py-1.5 rounded-md", style: { background: "#FBEAEA", color: "#C43D3D" } }, React.createElement(Trash2, { size: 11 }), "Удалить")));
-    }
+body = React.createElement("div", { className: "text-sm space-y-2" },
+    React.createElement("div", null, `${WEEKDAYS[occ.recurring.weekday]}, ${occ.recurring.startTime} · ${occ.recurring.durationMin} мин`),
+    occ.recurring.notes ? React.createElement("div", { className: "text-xs px-2 py-1.5 rounded", style: { background: "#F8F9FC", color: "var(--ink)" } }, occ.recurring.notes) : null,
+    React.createElement("div", { className: "text-xs", style: { color: "var(--ink-soft)" } }, "Регулярная встреча."),
+    React.createElement("div", { className: "flex gap-2 pt-1" },
+        React.createElement("button", { onClick: () => onEditRecurring(occ.recurring), className: "flex items-center gap-1 text-xs px-3 py-1.5 rounded-md", style: { background: "var(--accent-soft)", color: "var(--accent)" } }, React.createElement(Pencil, { size: 11 }), "Редактировать"),
+        React.createElement("button", { onClick: () => onDeleteRecurringOccurrence(occ.recurring, date), className: "flex items-center gap-1 text-xs px-3 py-1.5 rounded-md", style: { background: "#FBEAEA", color: "#C43D3D" } }, React.createElement(Trash2, { size: 11 }), "Удалить только это"),
+        React.createElement("button", { onClick: () => onDeleteRecurringFromDate(occ.recurring, date), className: "flex items-center gap-1 text-xs px-3 py-1.5 rounded-md", style: { background: "#FBEAEA", color: "#C43D3D" } }, React.createElement(Trash2, { size: 11 }), "Это и все последующие")
+    )
+);    }
     else if (occ.kind === "pending") {
         const req = occ.request;
         title = req.title;
