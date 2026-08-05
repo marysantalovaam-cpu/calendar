@@ -24,7 +24,7 @@ const { useState, useEffect, useCallback, useMemo, useRef } = React;
    НАСТРОЙКА: вставь сюда URL своей Firebase Realtime Database.
    ====================================================================== */
 const DB_URL = "https://calendar-84b06-default-rtdb.europe-west1.firebasedatabase.app";
-const APP_VERSION = "2026-08-05-01"; // меняйте эту строку при каждом деплое — по ней вкладки понимают, что вышла новая версия/* Простые иконки-заглушки без внешних зависимостей */
+const APP_VERSION = "2026-08-05-02"; // меняйте эту строку при каждом деплое — по ней вкладки понимают, что вышла новая версия/* Простые иконки-заглушки без внешних зависимостей */
 function mkIcon(char) {
     return function Icon({ size = 16, color, className, style, ...rest }) {
         return React.createElement("span", {
@@ -301,8 +301,10 @@ function zoomLoadForDay(state, ds) {
 }
 const OCC_COLOR = { recurring: "var(--recurring)", confirmed: "var(--event)", dayoff: "var(--dayoff)", personal: "var(--manual)", pending: "var(--pending-wash)" };
 function App() {
-    const [state, setState] = useState(defaultState());
-    const [loading, setLoading] = useState(true);
+const [state, setState] = useState(defaultState());
+const stateRef = useRef(state);
+stateRef.current = state; // синхронно обновляется на каждом рендере — гарантированно свежее значение
+  const [loading, setLoading] = useState(true);
     const [me, setMeRaw] = useState("");
     const [adminRealId, setAdminRealId] = useState(""); // настоящая личность вошедшего — не меняется при просмотре "как другой человек"
     const [viewYM, setViewYM] = useState(() => { const t = new Date(); return { y: t.getFullYear(), m: t.getMonth() }; });
@@ -557,14 +559,17 @@ useEffect(() => {
     }
     flash("Не удалось сохранить изменение — попробуй ещё раз или обнови страницу.");
 }
-    async function commit(mutator) {
+   async function commit(mutator) {
         if (!dbSyncedRef.current) {
             flash("Нет связи с базой данных — это изменение НЕ сохранится. Обнови страницу.");
-            setState(prev => mutator(structuredClone(prev)));
+            const next = mutator(structuredClone(stateRef.current));
+            stateRef.current = next;
+            setState(next);
             return;
         }
-        let localNext;
-        setState(prev => { localNext = mutator(structuredClone(prev)); return localNext; });
+        const localNext = mutator(structuredClone(stateRef.current));
+        stateRef.current = localNext; // сразу обновляем, чтобы следующий commit() (даже до перерендера) видел актуальные данные
+        setState(localNext);
         await persistWithRetry(mutator, localNext);
     }
     function addPerson(name) {
