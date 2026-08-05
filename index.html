@@ -379,21 +379,38 @@ function App() {
     // Для гарантированной ежедневной рассылки по расписанию (даже если никто не открыл вкладку)
     // нужен отдельный сервер/облачная функция с cron — это не может сделать статический HTML.
     useEffect(() => {
-        if (loading || !me)
-            return;
+    if (loading || !me)
+        return;
+    function checkDailyDigest() {
+        const now = new Date();
+        if (now.getHours() < 10) return; // ещё не 10:00 — рано
         const today = todayStr();
-        if (state.lastReminderDate === today)
-            return;
-        const todays = state.requests.filter(r => r.date === today && r.status === "confirmed").sort((a, b) => a.startTime.localeCompare(b.startTime));
-        // Помечаем день как обработанный сразу, ещё до отправки, чтобы другие открытые вкладки
-        // не успели отправить то же самое письмо повторно.
-        commit(s => { if (s.lastReminderDate === today)
-            return s; s.lastReminderDate = today; return s; });
-        if (todays.length === 0)
-            return;
-        const lines = todays.map(r => `${r.startTime} — ${r.title} (${r.attendees.map(a => personName(state.team, a)).join(", ")})${r.zoomNeeded && !r.zoomSetupDone ? " ⚠️ нет ссылки на Zoom" : ""}`);
-        sendTelegram(`📅 Созвоны на сегодня, ${today}:\n${lines.join("\n")}`);
-    }, [loading, me, state.requests, state.team, state.lastReminderDate]);
+        if (state.lastReminderDate === today) return; // уже знаем, что сегодня отправлено
+
+        // Атомарная попытка "застолбить" отправку дневной сводки — та же защита,
+        // что и у напоминаний "за 10 минут". Побеждает только тот, кто первым
+        // успешно запишет claim; все остальные вкладки/участники команды просто
+        // увидят, что день уже обработан, и ничего не отправят.
+        claimReminder(`daily-${today}`).then(won => {
+            if (!won) {
+                commit(s => { if (s.lastReminderDate !== today) s.lastReminderDate = today; return s; });
+                return;
+            }
+            commit(s => { s.lastReminderDate = today; return s; });
+
+            const todays = state.requests
+                .filter(r => r.date === today && r.status === "confirmed")
+                .sort((a, b) => a.startTime.localeCompare(b.startTime));
+            if (todays.length === 0) return;
+
+            const lines = todays.map(r => `${r.startTime} — ${r.title} (${r.attendees.map(a => tgMention(personName(state.team, a))).join(", ")})${r.zoomNeeded && !r.zoomSetupDone ? " ⚠️ нет ссылки на Zoom" : ""}`);
+            sendTelegram(`📅 Созвоны на сегодня, ${today}:\n${lines.join("\n")}`);
+        });
+    }
+    checkDailyDigest();
+    const id = setInterval(checkDailyDigest, 60000); // проверяем раз в минуту, не на каждый чих state
+    return () => clearInterval(id);
+}, [loading, me]);
     // Напоминание за 10 минут до созвона в Telegram: тегает всех участников и присылает ссылку
     // на Zoom (если она уже есть). Как и с дневной сводкой, чтобы сообщение не дублировалось,
     // если у нескольких людей планировщик открыт одновременно, факт отправки помечается прямо на
