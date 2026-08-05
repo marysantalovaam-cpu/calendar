@@ -24,7 +24,7 @@ const { useState, useEffect, useCallback, useMemo, useRef } = React;
    НАСТРОЙКА: вставь сюда URL своей Firebase Realtime Database.
    ====================================================================== */
 const DB_URL = "https://calendar-84b06-default-rtdb.europe-west1.firebasedatabase.app";
-/* Простые иконки-заглушки без внешних зависимостей */
+const APP_VERSION = "2026-08-05-01"; // меняйте эту строку при каждом деплое — по ней вкладки понимают, что вышла новая версия/* Простые иконки-заглушки без внешних зависимостей */
 function mkIcon(char) {
     return function Icon({ size = 16, color, className, style, ...rest }) {
         return React.createElement("span", {
@@ -371,6 +371,30 @@ function App() {
         return () => clearInterval(pollRef.current);
     }, [refresh]);
     useEffect(() => { modalOpenRef.current = modalOpen; }, [modalOpen]);
+  // Автообновление: раз в 2 минуты вкладка сверяет свою версию с той, что реально лежит
+// на сервере, и если код обновился — тихо перезагружается сама. Это нужно, чтобы после
+// каждого деплоя все открытые у команды вкладки сами подхватили новый код без того,
+// чтобы кого-то просить руками нажимать обновление страницы.
+useEffect(() => {
+    async function checkForUpdate() {
+        try {
+            const res = await fetch(window.location.href, { cache: "no-store" });
+            if (!res.ok) return;
+            const html = await res.text();
+            const match = html.match(/APP_VERSION\s*=\s*"([^"]+)"/);
+            if (match && match[1] !== APP_VERSION) {
+                if (!modalOpenRef.current) {
+                    window.location.reload();
+                }
+            }
+        }
+        catch (e) {
+            // сеть моргнула — не страшно, попробуем на следующем цикле
+        }
+    }
+    const id = setInterval(checkForUpdate, 120000);
+    return () => clearInterval(id);
+}, []);
     // Напоминание о сегодняшних созвонах в Telegram — лучшее, что можно сделать без сервера:
     // отправляется РОВНО ОДИН РАЗ В ДЕНЬ на всю команду. Флаг "уже отправлено" хранится в общей
     // базе (state.lastReminderDate), а не в localStorage каждого браузера — поэтому неважно,
@@ -422,18 +446,26 @@ function App() {
     // всё равно дошло, пусть и с опозданием. Полностью гарантировать доставку "минута в минуту"
     // без открытой вкладки ни у кого статический HTML не может — для этого нужен отдельный сервер
     // с cron/планировщиком задач.
-    async function claimReminder(reqId) {
+   async function claimReminder(reqId) {
     const path = `${DB_URL}/reminderClaims/${reqId}.json`;
-    const existing = await fetch(path).then(r => r.json()).catch(() => null);
-    if (existing) return false;
-    const putRes = await fetch(path, {
-        method: "PUT",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(true)
-    });
-    if (!putRes.ok) return false;
-    const check = await fetch(path).then(r => r.json()).catch(() => null);
-    return check === true;
+    try {
+        const res = await fetch(path, { headers: { "X-Firebase-ETag": "true" } });
+        if (!res.ok) return false;
+        const etag = res.headers.get("ETag");
+        const existing = await res.json();
+        if (existing) return false; // кто-то уже отправил
+        const putRes = await fetch(path, {
+            method: "PUT",
+            headers: { "Content-Type": "application/json", ...(etag ? { "if-match": etag } : {}) },
+            body: JSON.stringify(true)
+        });
+        if (putRes.status === 412) return false; // кто-то успел записать раньше нас — не наша победа
+        return putRes.ok;
+    }
+    catch (e) {
+        console.error("claimReminder failed", e);
+        return false;
+    }
 }
 useEffect(() => {
     if (loading || !me)
@@ -505,22 +537,26 @@ useEffect(() => {
     // корректно ложится на самые свежие данные, а не стирает их. Повторяем при необходимости.
     // Это работает автоматически, без ручного "все обновите страницу".
     async function persistWithRetry(mutator, base, attempt = 0) {
-        const result = await saveState(base, dbEtagRef.current);
-        if (result.ok) {
-            dbEtagRef.current = result.etag;
-            return;
-        }
-        if (result.conflict && attempt < 4) {
-            const fresh = await loadState();
-            if (fresh.ok) {
-                dbEtagRef.current = fresh.etag;
-                const merged = mutator(structuredClone(fresh.state));
-                setState(merged);
-                return persistWithRetry(mutator, merged, attempt + 1);
-            }
-        }
-        flash("Не удалось сохранить изменение — попробуй ещё раз или обнови страницу.");
+    const result = await saveState(base, dbEtagRef.current);
+    if (result.ok) {
+        dbEtagRef.current = result.etag;
+        return;
     }
+    if (result.conflict && attempt < 8) {
+        // Небольшая пауза перед повтором — снижает шанс снова столкнуться с тем,
+        // кто только что записал свою версию, особенно если кто-то пишет в базу
+        // очень часто (например зависшая вкладка со старым кодом).
+        await new Promise(r => setTimeout(r, 250 * (attempt + 1)));
+        const fresh = await loadState();
+        if (fresh.ok) {
+            dbEtagRef.current = fresh.etag;
+            const merged = mutator(structuredClone(fresh.state));
+            setState(merged);
+            return persistWithRetry(mutator, merged, attempt + 1);
+        }
+    }
+    flash("Не удалось сохранить изменение — попробуй ещё раз или обнови страницу.");
+}
     async function commit(mutator) {
         if (!dbSyncedRef.current) {
             flash("Нет связи с базой данных — это изменение НЕ сохранится. Обнови страницу.");
