@@ -135,8 +135,17 @@ const END_TIME_SLOTS = (function () { const out = []; for (let h = 8; h <= 23; h
 } return out; })(); // варианты окончания — шире стартовых, чтобы влезали длинные события
 function toMinutes(t) { const [h, m] = t.split(":").map(Number); return h * 60 + m; }
 function minutesBetween(start, end) { const d = toMinutes(end) - toMinutes(start); return d > 0 ? d : 30; }
-function minutesUntil(dateStr, time) { const [h, m] = time.split(":").map(Number); const target = new Date(dateStr + "T" + pad(h) + ":" + pad(m) + ":00"); return (target.getTime() - Date.now()) / 60000; }
-// НОВОЕ — определяет, что созвон уже закончился (начался + прошла его длительность)
+// Все времена в приложении считаются московскими (UTC+3, без перехода на летнее время),
+// независимо от того, в каком часовом поясе физически находится устройство, на котором
+// открыта вкладка — иначе "15:00" на устройстве с другим системным поясом означает другой
+// момент времени, и напоминания уходят не тогда, когда нужно.
+const TEAM_TZ_OFFSET = "+03:00";
+function minutesUntil(dateStr, time) {
+    const [h, m] = time.split(":").map(Number);
+    const target = new Date(`${dateStr}T${pad(h)}:${pad(m)}:00${TEAM_TZ_OFFSET}`);
+    return (target.getTime() - Date.now()) / 60000;
+}
+  // НОВОЕ — определяет, что созвон уже закончился (начался + прошла его длительность)
 function meetingEnded(r) { return minutesUntil(r.date, r.startTime) <= -(r.duration || 0); }
 function endTimeFromDuration(start, durMin) { const total = toMinutes(start) + durMin; const h = Math.floor(total / 60), m = total % 60; return `${pad(h)}:${pad(m)}`; }
 function endOptionsAfter(start) { return END_TIME_SLOTS.filter(t => toMinutes(t) > toMinutes(start)); }
@@ -424,13 +433,30 @@ useEffect(() => {
             }
             commit(s => { s.lastReminderDate = today; return s; });
 
-            const todays = state.requests
-                .filter(r => r.date === today && r.status === "confirmed")
-                .sort((a, b) => a.startTime.localeCompare(b.startTime));
-            if (todays.length === 0) return;
-
-            const lines = todays.map(r => `${r.startTime} — ${r.title} (${r.attendees.map(a => tgMention(personName(state.team, a))).join(", ")})${r.zoomNeeded && !r.zoomSetupDone ? " ⚠️ нет ссылки на Zoom" : ""}`);
-            sendTelegram(`📅 Созвоны на сегодня, ${today}:\n${lines.join("\n")}`);
+           const wd = weekdayOfDate(today);
+const todaysRecurring = state.recurring.filter(r => r.weekday === wd
+    && !(r.until && today >= r.until)
+    && !(Array.isArray(r.excludedDates) && r.excludedDates.includes(today)));
+function recurringAttendeeIds(r) {
+    if (r.attendees === "all") return state.team.map(p => p.id);
+    if (r.attendees === "core") return state.team.filter(p => p.core).map(p => p.id);
+    return Array.isArray(r.attendees) ? r.attendees : [];
+}
+const items = [
+    ...state.requests
+        .filter(r => r.date === today && r.status === "confirmed")
+        .map(r => ({
+            time: r.startTime,
+            text: `${r.startTime} — ${r.title} (${r.attendees.map(a => tgMention(personName(state.team, a))).join(", ")})${r.zoomNeeded && !r.zoomSetupDone ? " ⚠️ нет ссылки на Zoom" : ""}`
+        })),
+    ...todaysRecurring.map(r => ({
+        time: r.startTime,
+        text: `${r.startTime} — ${r.title} (регулярная встреча${r.zoom ? ", Zoom" : ""}: ${recurringAttendeeIds(r).map(a => tgMention(personName(state.team, a))).join(", ")})`
+    }))
+].sort((a, b) => a.time.localeCompare(b.time));
+if (items.length === 0) return;
+sendTelegram(`📅 Созвоны на сегодня, ${today}:\n${items.map(i => i.text).join("\n")}`);
+          
         });
     }
     checkDailyDigest();
@@ -661,11 +687,13 @@ function deleteRecurringFromDate(id, date) {
             const attendeesChanged = JSON.stringify([...r.attendees].sort()) !== JSON.stringify([...payload.attendees].sort());
             s.busySlots = s.busySlots.filter(b => b.requestId !== id);
             s.zoomSlots = s.zoomSlots.filter(z => z.requestId !== id);
-            r.title = payload.title;
-            r.date = payload.date;
-            r.startTime = payload.startTime;
-            r.duration = payload.duration;
-            r.zoomNeeded = payload.zoomNeeded;
+const timeChanged = r.date !== payload.date || r.startTime !== payload.startTime;
+r.title = payload.title;
+r.date = payload.date;
+r.startTime = payload.startTime;
+r.duration = payload.duration;
+if (timeChanged) r.tenMinReminded = false;
+          r.zoomNeeded = payload.zoomNeeded;
             r.zoomLink = payload.zoomLink;
             r.zoomSetupDone = !!(payload.zoomLink && payload.zoomLink.trim());
             r.notes = payload.notes || "";
