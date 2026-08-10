@@ -24,7 +24,7 @@ const { useState, useEffect, useCallback, useMemo, useRef } = React;
    НАСТРОЙКА: вставь сюда URL своей Firebase Realtime Database.
    ====================================================================== */
 const DB_URL = "https://calendar-84b06-default-rtdb.europe-west1.firebasedatabase.app";
-const APP_VERSION = "2026-08-06-01"; // меняйте эту строку при каждом деплое — по ней вкладки понимают, что вышла новая версия/* Простые иконки-заглушки без внешних зависимостей */
+const APP_VERSION = "2026-08-10-01"; // меняйте эту строку при каждом деплое — по ней вкладки понимают, что вышла новая версия/* Простые иконки-заглушки без внешних зависимостей */
 function mkIcon(char) {
     return function Icon({ size = 16, color, className, style, ...rest }) {
         return React.createElement("span", {
@@ -327,11 +327,12 @@ stateRef.current = state; // синхронно обновляется на ка
     const [newPersonName, setNewPersonName] = useState("");
     const [toast, setToast] = useState("");
     const [creatingSlot, setCreatingSlot] = useState(null); // { date, time }
+    const [dayCellChoice, setDayCellChoice] = useState(null); // { date, time } — выбор типа события при клике по пустой ячейке
     const [viewingSlot, setViewingSlot] = useState(null); // { personId, date, time, occ }
     const [editingEvent, setEditingEvent] = useState(null); // busyEvent being edited
     const [editingRequest, setEditingRequest] = useState(null); // созвон (request), редактируемый админом
     const [editingRecurring, setEditingRecurring] = useState(null); // регулярная встреча, редактируемая админом
-    const modalOpen = showNewEvent || showInbox || showAddPerson || showRecForm || !!creatingSlot || !!viewingSlot || !!editingEvent || showAllMeetings || !!editingRequest || !!editingRecurring;
+    const modalOpen = showNewEvent || showInbox || showAddPerson || showRecForm || !!creatingSlot || !!viewingSlot || !!editingEvent || showAllMeetings || !!editingRequest || !!editingRecurring || !!dayCellChoice;
     const pollRef = useRef(null);
     const modalOpenRef = useRef(false);
     // true только после хотя бы одной УСПЕШНОЙ загрузки состояния с сервера. Пока false —
@@ -906,7 +907,7 @@ const recCount = state.recurring.filter(r => r.weekday === wd
             setViewingSlot({ personId, date, time, occ });
         }
         else if (personId === me) {
-            setCreatingSlot({ date, time });
+            setDayCellChoice({ date, time });
         }
         else {
             flash("Отмечать можно только свою занятость — но можно позвать этого человека при создании события");
@@ -995,6 +996,25 @@ const recCount = state.recurring.filter(r => r.weekday === wd
         onClose: () => setCreatingSlot(null),
         onSubmit: (ev) => { saveBusyEvent(ev); setCreatingSlot(null); }
     }) : null;
+    const dayCellChoiceModal = dayCellChoice ? React.createElement(Modal, { onClose: () => setDayCellChoice(null), title: "Что запланировать?" },
+        React.createElement("div", { className: "space-y-2" },
+            React.createElement("button", {
+                onClick: () => { const d = dayCellChoice; setDayCellChoice(null); setCreatingSlot(d); },
+                className: "w-full flex items-center gap-2 text-sm px-3 py-2.5 rounded-lg border text-left",
+                style: { borderColor: "var(--border)" }
+            }, React.createElement(Ban, { size: 14, color: "var(--dayoff)" }), React.createElement("span", null, "Отгул / отсутствие на месте")),
+            React.createElement("button", {
+                onClick: () => {
+                    const d = dayCellChoice;
+                    setDayCellChoice(null);
+                    setRescheduleSeed({ title: "Созвон", date: d.date, startTime: d.time, duration: 60, attendees: [me], zoomNeeded: true, zoomLink: null });
+                    setShowNewEvent(true);
+                },
+                className: "w-full flex items-center gap-2 text-sm px-3 py-2.5 rounded-lg border text-left",
+                style: { borderColor: "var(--border)" }
+            }, React.createElement(Video, { size: 14, color: "var(--zoom)" }), React.createElement("span", null, "Созвон"))
+        )
+    ) : null;
     const editEventModal = editingEvent ? React.createElement(EventFormModal, {
         team: state.team, me, date: editingEvent.date, time: editingEvent.startTime, existing: editingEvent,
         onClose: () => setEditingEvent(null),
@@ -1076,7 +1096,7 @@ const allMeetingsItems = [
     }
   `);
     const toastEl = toast ? React.createElement("div", { className: "fixed top-4 left-1/2 -translate-x-1/2 z-50 px-4 py-2 rounded-lg shadow-lg text-sm", style: { background: "var(--ink)", color: "#fff" } }, toast) : null;
-    return React.createElement("div", { className: "w-full", style: { fontFamily: "var(--font-body)", background: "var(--bg)", color: "var(--ink)", minHeight: "100%" } }, globalStyleEl, toastEl, headerEl, bodyEl, addPersonModal, recFormModal, editRecurringModal, newEventModal, editRequestModal, createSlotModal, editEventModal, viewSlotModal, inboxModal, allMeetingsModal);
+return React.createElement("div", { className: "w-full", style: { fontFamily: "var(--font-body)", background: "var(--bg)", color: "var(--ink)", minHeight: "100%" } }, globalStyleEl, toastEl, headerEl, bodyEl, addPersonModal, recFormModal, editRecurringModal, newEventModal, editRequestModal, createSlotModal, editEventModal, viewSlotModal, inboxModal, allMeetingsModal, dayCellChoiceModal);
 }
 function Gate({ team, onPick, onCreate }) {
     const [name, setName] = useState("");
@@ -1213,7 +1233,7 @@ function NewEventModal({ state, me, isAdmin, selectedDate, seed, existing, onClo
     const [date, setDate] = useState(src ? src.date : selectedDate);
     const [startTime, setStartTime] = useState(src ? src.startTime : "12:00");
     const [duration, setDuration] = useState(src ? src.duration : 60);
-    const [instant, setInstant] = useState(false);
+    const instant = true; // все созвоны теперь создаются сразу подтверждёнными — без согласования
     const endTime = endTimeFromDuration(startTime, duration);
     function onStartChange(v) { setStartTime(v); const opts = endOptionsAfter(v); if (!opts.includes(endTime))
         setDuration(minutesBetween(v, opts[0] || endTimeFromDuration(v, 30))); }
@@ -1229,11 +1249,11 @@ function NewEventModal({ state, me, isAdmin, selectedDate, seed, existing, onClo
         return { ...p, busy };
     });
     const zoomBusy = zoomNeeded && covered.some(t => isZoomBusyAt(state, date, t).busy);
-    return React.createElement(Modal, { title: existing ? "Редактировать созвон" : "Предложить созвон", onClose, wide: true }, React.createElement("div", { className: "space-y-3 text-sm" }, existing ? React.createElement("div", { className: "text-xs px-2 py-1.5 rounded", style: { background: "var(--accent-soft)", color: "var(--accent)" } }, "Редактирование созвона. Если поменяешь состав участников — согласование запустится заново.") : null, React.createElement("div", null, React.createElement("label", { className: "text-xs", style: { color: "var(--ink-soft)" } }, "Тема"), React.createElement("input", { value: title, onChange: e => setTitle(e.target.value), className: "w-full border rounded-lg px-3 py-2 mt-1", style: { borderColor: "var(--border)" } })), React.createElement("div", { className: "flex flex-wrap gap-2 items-end" }, React.createElement("div", { className: "flex-1 min-w-[130px]" }, React.createElement("label", { className: "text-xs", style: { color: "var(--ink-soft)" } }, "Дата"), React.createElement("input", { type: "date", value: date, onChange: e => setDate(e.target.value), className: "w-full border rounded-lg px-3 py-2 mt-1", style: { borderColor: "var(--border)" } })), React.createElement("div", { className: "flex-1 min-w-[110px]" }, React.createElement("label", { className: "text-xs", style: { color: "var(--ink-soft)" } }, "Начало"), React.createElement("select", { value: startTime, onChange: e => onStartChange(e.target.value), className: "w-full border rounded-lg px-3 py-2 mt-1", style: { borderColor: "var(--border)" } }, TIME_SLOTS.map(t => React.createElement("option", { key: t, value: t }, t)))), React.createElement("div", { className: "flex-1 min-w-[110px]" }, React.createElement("label", { className: "text-xs", style: { color: "var(--ink-soft)" } }, "Окончание"), React.createElement("select", { value: endTime, onChange: e => onEndChange(e.target.value), className: "w-full border rounded-lg px-3 py-2 mt-1", style: { borderColor: "var(--border)" } }, endOptionsAfter(startTime).map(t => React.createElement("option", { key: t, value: t }, t)))), React.createElement("div", { className: "text-xs pb-2", style: { color: "var(--ink-soft)", whiteSpace: "nowrap" } }, `${duration} мин`)), React.createElement("div", null, React.createElement("div", { className: "flex items-center justify-between" }, React.createElement("label", { className: "text-xs", style: { color: "var(--ink-soft)" } }, "Участники"), coreIds.length > 0 ? React.createElement("button", { onClick: () => setAttendees(coreIds), className: "text-[11px] px-2 py-0.5 rounded-md", style: { background: "var(--accent-soft)", color: "var(--accent)" } }, "◆ Основная команда") : null), React.createElement("div", { className: "flex flex-wrap gap-1.5 mt-1" }, state.team.map(p => React.createElement("button", { key: p.id, onClick: () => setAttendees(prev => prev.includes(p.id) ? prev.filter(x => x !== p.id) : [...prev, p.id]),
+    return React.createElement(Modal, { title: existing ? "Редактировать созвон" : "Предложить созвон", onClose, wide: true }, React.createElement("div", { className: "space-y-3 text-sm" }, existing ? React.createElement("div", { className: "text-xs px-2 py-1.5 rounded", style: { background: "var(--accent-soft)", color: "var(--accent)" } }, "Редактирование созвона. Изменения вступят в силу сразу — созвон остаётся подтверждённым.") : null, React.createElement("div", null, React.createElement("label", { className: "text-xs", style: { color: "var(--ink-soft)" } }, "Тема"), React.createElement("input", { value: title, onChange: e => setTitle(e.target.value), className: "w-full border rounded-lg px-3 py-2 mt-1", style: { borderColor: "var(--border)" } })), React.createElement("div", { className: "flex flex-wrap gap-2 items-end" }, React.createElement("div", { className: "flex-1 min-w-[130px]" }, React.createElement("label", { className: "text-xs", style: { color: "var(--ink-soft)" } }, "Дата"), React.createElement("input", { type: "date", value: date, onChange: e => setDate(e.target.value), className: "w-full border rounded-lg px-3 py-2 mt-1", style: { borderColor: "var(--border)" } })), React.createElement("div", { className: "flex-1 min-w-[110px]" }, React.createElement("label", { className: "text-xs", style: { color: "var(--ink-soft)" } }, "Начало"), React.createElement("select", { value: startTime, onChange: e => onStartChange(e.target.value), className: "w-full border rounded-lg px-3 py-2 mt-1", style: { borderColor: "var(--border)" } }, TIME_SLOTS.map(t => React.createElement("option", { key: t, value: t }, t)))), React.createElement("div", { className: "flex-1 min-w-[110px]" }, React.createElement("label", { className: "text-xs", style: { color: "var(--ink-soft)" } }, "Окончание"), React.createElement("select", { value: endTime, onChange: e => onEndChange(e.target.value), className: "w-full border rounded-lg px-3 py-2 mt-1", style: { borderColor: "var(--border)" } }, endOptionsAfter(startTime).map(t => React.createElement("option", { key: t, value: t }, t)))), React.createElement("div", { className: "text-xs pb-2", style: { color: "var(--ink-soft)", whiteSpace: "nowrap" } }, `${duration} мин`)), React.createElement("div", null, React.createElement("div", { className: "flex items-center justify-between" }, React.createElement("label", { className: "text-xs", style: { color: "var(--ink-soft)" } }, "Участники"), coreIds.length > 0 ? React.createElement("button", { onClick: () => setAttendees(coreIds), className: "text-[11px] px-2 py-0.5 rounded-md", style: { background: "var(--accent-soft)", color: "var(--accent)" } }, "◆ Основная команда") : null), React.createElement("div", { className: "flex flex-wrap gap-1.5 mt-1" }, state.team.map(p => React.createElement("button", { key: p.id, onClick: () => setAttendees(prev => prev.includes(p.id) ? prev.filter(x => x !== p.id) : [...prev, p.id]),
         className: "text-xs px-2 py-1 rounded-full border", style: { borderColor: attendees.includes(p.id) ? p.color : "var(--border)", background: attendees.includes(p.id) ? p.color + "22" : "transparent" } }, p.name)))), React.createElement("div", null, React.createElement("label", { className: "text-xs", style: { color: "var(--ink-soft)" } }, "Комментарий / доп. информация"), React.createElement("textarea", { value: notes, onChange: e => setNotes(e.target.value), rows: 2, placeholder: "Что за созвон, кто задействован, что ожидается…",
         className: "w-full border rounded-lg px-3 py-2 mt-1 text-sm", style: { borderColor: "var(--border)", resize: "vertical" } })), React.createElement("label", { className: "flex items-center gap-2 text-xs" }, React.createElement("input", { type: "checkbox", checked: zoomNeeded, onChange: e => setZoomNeeded(e.target.checked) }), " Нужен Zoom"), zoomNeeded && React.createElement("div", null, React.createElement("label", { className: "text-xs", style: { color: "var(--ink-soft)" } }, "Ссылка на Zoom (если уже есть — необязательно)"), React.createElement("input", { value: zoomLink, onChange: e => setZoomLink(e.target.value), placeholder: "https://zoom.us/j/...",
-        className: "w-full border rounded-lg px-3 py-2 mt-1 text-sm", style: { borderColor: "var(--border)" } }), React.createElement("div", { className: "text-[11px] mt-1", style: { color: "var(--ink-soft)" } }, "Если оставить пустым — задача добавить ссылку упадёт ответственному за Zoom после того, как все подтвердят участие.")), React.createElement("label", { className: "flex items-start gap-2 text-xs px-2.5 py-2 rounded-md", style: { background: "var(--accent-soft)" } }, React.createElement("input", { type: "checkbox", checked: instant, onChange: e => setInstant(e.target.checked), className: "mt-0.5" }), React.createElement("span", null, "Создать сразу как подтверждённый созвон — без согласования с участниками", React.createElement("span", { className: "block", style: { color: "var(--ink-soft)" } }, "Например, чтобы перенести старый созвон в календарь."))), React.createElement("div", { className: "rounded-lg p-3", style: { background: "#F8F9FC" } }, React.createElement("div", { className: "text-xs font-semibold mb-2", style: { color: "var(--ink-soft)" } }, "ДОСТУПНОСТЬ НА ВЫБРАННОЕ ВРЕМЯ"), preview.length === 0 && React.createElement("div", { className: "text-xs", style: { color: "var(--ink-soft)" } }, "Выбери участников."), React.createElement("div", { className: "flex flex-wrap gap-2" }, preview.map(p => React.createElement("span", { key: p.id, className: "text-xs px-2 py-1 rounded-md flex items-center gap-1.5", style: { background: p.busy ? "#FBEAEA" : "#E4F7EE", color: p.busy ? "#C43D3D" : "#1E7A46" } }, React.createElement("span", { className: "w-1.5 h-1.5 rounded-full", style: { background: p.busy ? "#C43D3D" : "#1E7A46" } }), p.name)), zoomNeeded && React.createElement("span", { className: "text-xs px-2 py-1 rounded-md flex items-center gap-1.5", style: { background: zoomBusy ? "#FBEAEA" : "#E4F7EE", color: zoomBusy ? "#C43D3D" : "#1E7A46" } }, React.createElement(Video, { size: 11 }), "Zoom"))), React.createElement("button", { disabled: !me || attendees.length === 0, onClick: () => onSubmit({ title, date, startTime, duration, attendees, zoomNeeded, zoomLink: zoomLink.trim() || null, notes: notes.trim(), instant }),
-        className: "w-full py-2 rounded-lg text-white text-sm font-medium disabled:opacity-40", style: { background: "var(--accent)" } }, existing ? "Сохранить изменения" : (instant ? "Создать и подтвердить" : "Отправить предложение"))));
+        className: "w-full border rounded-lg px-3 py-2 mt-1 text-sm", style: { borderColor: "var(--border)" } }), React.createElement("div", { className: "text-[11px] mt-1", style: { color: "var(--ink-soft)" } }, "Если оставить пустым — задача добавить ссылку упадёт ответственному за Zoom после того, как все подтвердят участие.")), React.createElement("div", { className: "rounded-lg p-3", style: { background: "#F8F9FC" } }, React.createElement("div", { className: "text-xs font-semibold mb-2", style: { color: "var(--ink-soft)" } }, "ДОСТУПНОСТЬ НА ВЫБРАННОЕ ВРЕМЯ"), preview.length === 0 && React.createElement("div", { className: "text-xs", style: { color: "var(--ink-soft)" } }, "Выбери участников."), React.createElement("div", { className: "flex flex-wrap gap-2" }, preview.map(p => React.createElement("span", { key: p.id, className: "text-xs px-2 py-1 rounded-md flex items-center gap-1.5", style: { background: p.busy ? "#FBEAEA" : "#E4F7EE", color: p.busy ? "#C43D3D" : "#1E7A46" } }, React.createElement("span", { className: "w-1.5 h-1.5 rounded-full", style: { background: p.busy ? "#C43D3D" : "#1E7A46" } }), p.name)), zoomNeeded && React.createElement("span", { className: "text-xs px-2 py-1 rounded-md flex items-center gap-1.5", style: { background: zoomBusy ? "#FBEAEA" : "#E4F7EE", color: zoomBusy ? "#C43D3D" : "#1E7A46" } }, React.createElement(Video, { size: 11 }), "Zoom"))), React.createElement("button", { disabled: !me || attendees.length === 0, onClick: () => onSubmit({ title, date, startTime, duration, attendees, zoomNeeded, zoomLink: zoomLink.trim() || null, notes: notes.trim(), instant }),
+        className: "w-full py-2 rounded-lg text-white text-sm font-medium disabled:opacity-40", style: { background: "var(--accent)" } }, existing ? "Сохранить изменения" : "Создать и подтвердить")));
 }
 const root = ReactDOM.createRoot(document.getElementById("root"));
 root.render(React.createElement(App));
