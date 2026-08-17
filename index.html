@@ -24,7 +24,7 @@ const { useState, useEffect, useCallback, useMemo, useRef } = React;
    НАСТРОЙКА: вставь сюда URL своей Firebase Realtime Database.
    ====================================================================== */
 const DB_URL = "https://calendar-84b06-default-rtdb.europe-west1.firebasedatabase.app";
-const APP_VERSION = "2026-08-10-01"; // меняйте эту строку при каждом деплое — по ней вкладки понимают, что вышла новая версия/* Простые иконки-заглушки без внешних зависимостей */
+const APP_VERSION = "2026-08-17-01"; // меняйте эту строку при каждом деплое — по ней вкладки понимают, что вышла новая версия/* Простые иконки-заглушки без внешних зависимостей */
 function mkIcon(char) {
     return function Icon({ size = 16, color, className, style, ...rest }) {
         return React.createElement("span", {
@@ -418,50 +418,44 @@ useEffect(() => {
     if (loading || !me)
         return;
     function checkDailyDigest() {
-        const now = new Date();
-        if (now.getHours() < 10) return; // ещё не 10:00 — рано
+        const s = stateRef.current; // всегда актуальное состояние, а не снимок на момент монтирования эффекта
+        const mskHour = Number(new Date().toLocaleString("en-US", { timeZone: "Europe/Moscow", hour: "2-digit", hour12: false }));
+        if (mskHour < 10) return;
         const today = todayStr();
-        if (state.lastReminderDate === today) return; // уже знаем, что сегодня отправлено
-
-        // Атомарная попытка "застолбить" отправку дневной сводки — та же защита,
-        // что и у напоминаний "за 10 минут". Побеждает только тот, кто первым
-        // успешно запишет claim; все остальные вкладки/участники команды просто
-        // увидят, что день уже обработан, и ничего не отправят.
+        if (s.lastReminderDate === today) return;
         claimReminder(`daily-${today}`).then(won => {
             if (!won) {
-                commit(s => { if (s.lastReminderDate !== today) s.lastReminderDate = today; return s; });
+                commit(x => { if (x.lastReminderDate !== today) x.lastReminderDate = today; return x; });
                 return;
             }
-            commit(s => { s.lastReminderDate = today; return s; });
-
-           const wd = weekdayOfDate(today);
-const todaysRecurring = state.recurring.filter(r => r.weekday === wd
-    && !(r.until && today >= r.until)
-    && !(Array.isArray(r.excludedDates) && r.excludedDates.includes(today)));
-function recurringAttendeeIds(r) {
-    if (r.attendees === "all") return state.team.map(p => p.id);
-    if (r.attendees === "core") return state.team.filter(p => p.core).map(p => p.id);
-    return Array.isArray(r.attendees) ? r.attendees : [];
-}
-const items = [
-    ...state.requests
-        .filter(r => r.date === today && r.status === "confirmed")
-        .map(r => ({
-            time: r.startTime,
-            text: `${r.startTime} — ${r.title} (${r.attendees.map(a => tgMention(personName(state.team, a))).join(", ")})${r.zoomNeeded && !r.zoomSetupDone ? " ⚠️ нет ссылки на Zoom" : ""}`
-        })),
-    ...todaysRecurring.map(r => ({
-        time: r.startTime,
-        text: `${r.startTime} — ${r.title} (регулярная встреча${r.zoom ? ", Zoom" : ""}: ${recurringAttendeeIds(r).map(a => tgMention(personName(state.team, a))).join(", ")})`
-    }))
-].sort((a, b) => a.time.localeCompare(b.time));
-if (items.length === 0) return;
-sendTelegram(`📅 Созвоны на сегодня, ${today}:\n${items.map(i => i.text).join("\n")}`);
-          
+            commit(x => { x.lastReminderDate = today; return x; });
+            const wd = weekdayOfDate(today);
+            const todaysRecurring = s.recurring.filter(r => r.weekday === wd
+                && !(r.until && today >= r.until)
+                && !(Array.isArray(r.excludedDates) && r.excludedDates.includes(today)));
+            function recurringAttendeeIds(r) {
+                if (r.attendees === "all") return s.team.map(p => p.id);
+                if (r.attendees === "core") return s.team.filter(p => p.core).map(p => p.id);
+                return Array.isArray(r.attendees) ? r.attendees : [];
+            }
+            const items = [
+                ...s.requests
+                    .filter(r => r.date === today && r.status === "confirmed")
+                    .map(r => ({
+                        time: r.startTime,
+                        text: `${r.startTime} — ${r.title} (${r.attendees.map(a => tgMention(personName(s.team, a))).join(", ")})${r.zoomNeeded && !r.zoomSetupDone ? " ⚠️ нет ссылки на Zoom" : ""}`
+                    })),
+                ...todaysRecurring.map(r => ({
+                    time: r.startTime,
+                    text: `${r.startTime} — ${r.title} (регулярная встреча${r.zoom ? ", Zoom" : ""}: ${recurringAttendeeIds(r).map(a => tgMention(personName(s.team, a))).join(", ")})`
+                }))
+            ].sort((a, b) => a.time.localeCompare(b.time));
+            if (items.length === 0) return;
+            sendTelegram(`📅 Созвоны на сегодня, ${today}:\n${items.map(i => i.text).join("\n")}`);
         });
     }
     checkDailyDigest();
-    const id = setInterval(checkDailyDigest, 60000); // проверяем раз в минуту, не на каждый чих state
+    const id = setInterval(checkDailyDigest, 60000);
     return () => clearInterval(id);
 }, [loading, me]);
     // Напоминание за 10 минут до созвона в Telegram: тегает всех участников и присылает ссылку
