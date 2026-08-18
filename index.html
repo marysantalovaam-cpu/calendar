@@ -24,7 +24,7 @@ const { useState, useEffect, useCallback, useMemo, useRef } = React;
    НАСТРОЙКА: вставь сюда URL своей Firebase Realtime Database.
    ====================================================================== */
 const DB_URL = "https://calendar-84b06-default-rtdb.europe-west1.firebasedatabase.app";
-const APP_VERSION = "2026-08-18-01"; // меняйте эту строку при каждом деплое — по ней вкладки понимают, что вышла новая версия/* Простые иконки-заглушки без внешних зависимостей */
+const APP_VERSION = "2026-08-18-02"; // меняйте эту строку при каждом деплое — по ней вкладки понимают, что вышла новая версия/* Простые иконки-заглушки без внешних зависимостей */
 function mkIcon(char) {
     return function Icon({ size = 16, color, className, style, ...rest }) {
         return React.createElement("span", {
@@ -144,8 +144,11 @@ function minutesBetween(start, end) { const d = toMinutes(end) - toMinutes(start
 // открыта вкладка — иначе "15:00" на устройстве с другим системным поясом означает другой
 // момент времени, и напоминания уходят не тогда, когда нужно.
 const TEAM_TZ_OFFSET = "+03:00";
-function minutesUntil(dateStr, time) { ... }
-
+function minutesUntil(dateStr, time) {
+    const [h, m] = time.split(":").map(Number);
+    const target = new Date(`${dateStr}T${pad(h)}:${pad(m)}:00${TEAM_TZ_OFFSET}`);
+    return (target.getTime() - Date.now()) / 60000;
+}
 // Надёжные московские "сейчас" — без Intl/toLocaleString, поведение которых для 00:xx
 // (полночь) отличается между браузерами (возвращают час "24" вместо "00", из-за чего
 // проверки вида "ещё рано слать" не срабатывали ровно в те моменты, когда рано).
