@@ -24,7 +24,7 @@ const { useState, useEffect, useCallback, useMemo, useRef } = React;
    НАСТРОЙКА: вставь сюда URL своей Firebase Realtime Database.
    ====================================================================== */
 const DB_URL = "https://calendar-84b06-default-rtdb.europe-west1.firebasedatabase.app";
-const APP_VERSION = "2026-08-18-02"; // меняйте эту строку при каждом деплое — по ней вкладки понимают, что вышла новая версия/* Простые иконки-заглушки без внешних зависимостей */
+const APP_VERSION = "2026-08-20-01"; // меняйте эту строку при каждом деплое — по ней вкладки понимают, что вышла новая версия/* Простые иконки-заглушки без внешних зависимостей */
 function mkIcon(char) {
     return function Icon({ size = 16, color, className, style, ...rest }) {
         return React.createElement("span", {
@@ -271,6 +271,8 @@ function getOccupant(state, personId, date, time) {
         return false;
     if (r.until && date >= r.until)
         return false;
+    if (r.since && date < r.since)
+        return false;
     if (Array.isArray(r.excludedDates) && r.excludedDates.includes(date))
         return false;
     const inAttendees = r.attendees === "all"
@@ -304,9 +306,11 @@ function isPersonBusyAt(state, personId, date, time) {
 function isZoomBusyAt(state, date, time) {
     const wd = weekdayOfDate(date);
     const rec = state.recurring.find(r => r.weekday === wd && r.zoom
-        && !(r.until && date >= r.until)
-        && !(Array.isArray(r.excludedDates) && r.excludedDates.includes(date))
-        && slotsForRange(r.startTime, r.durationMin).includes(time));    if (rec)
+    && !(r.until && date >= r.until)
+    && !(r.since && date < r.since)
+    && !(Array.isArray(r.excludedDates) && r.excludedDates.includes(date))
+    && slotsForRange(r.startTime, r.durationMin).includes(time));    
+  if (rec)
         return { busy: true, kind: "recurring", label: rec.title };
     const z = state.zoomSlots.find(s => s.date === date && s.time === time);
     if (z)
@@ -347,8 +351,12 @@ stateRef.current = state; // синхронно обновляется на ка
     const [editingEvent, setEditingEvent] = useState(null); // busyEvent being edited
     const [editingRequest, setEditingRequest] = useState(null); // созвон (request), редактируемый админом
     const [editingRecurring, setEditingRecurring] = useState(null); // регулярная встреча, редактируемая админом
-    const modalOpen = showNewEvent || showInbox || showAddPerson || showRecForm || !!creatingSlot || !!viewingSlot || !!editingEvent || showAllMeetings || !!editingRequest || !!editingRecurring || !!dayCellChoice;
-    const pollRef = useRef(null);
+    const [editRecurringChoice, setEditRecurringChoice] = useState(null); // {rec, date} — выбор масштаба редактирования
+    const [editRecurringOccurrence, setEditRecurringOccurrence] = useState(null); // {rec, date} — "только это"
+    const [editRecurringFollowingSeed, setEditRecurringFollowingSeed] = useState(null); // {rec, date} — "это и все следующие"
+    const modalOpen = showNewEvent || showInbox || showAddPerson || showRecForm || !!creatingSlot || !!viewingSlot || !!editingEvent || showAllMeetings || !!editingRequest || !!editingRecurring || !!dayCellChoice
+        || !!editRecurringChoice || !!editRecurringOccurrence || !!editRecurringFollowingSeed;
+  const pollRef = useRef(null);
     const modalOpenRef = useRef(false);
     // true только после хотя бы одной УСПЕШНОЙ загрузки состояния с сервера. Пока false —
     // commit() отказывается сохранять что-либо, чтобы неудачное чтение (сбой сети и т.п.)
@@ -445,8 +453,9 @@ function checkDailyDigest() {
         const tomorrow = moscowTomorrowStr();
         const wd = weekdayOfDate(tomorrow);
         const tomorrowsRecurring = s.recurring.filter(r => r.weekday === wd
-            && !(r.until && tomorrow >= r.until)
-            && !(Array.isArray(r.excludedDates) && r.excludedDates.includes(tomorrow)));
+    && !(r.until && tomorrow >= r.until)
+    && !(r.since && tomorrow < r.since)
+    && !(Array.isArray(r.excludedDates) && r.excludedDates.includes(tomorrow)));
         function recurringAttendeeIds(r) {
             if (r.attendees === "all") return s.team.map(p => p.id);
             if (r.attendees === "core") return s.team.filter(p => p.core).map(p => p.id);
@@ -700,6 +709,47 @@ function deleteRecurringFromDate(id, date) {
         return s;
     });
 }
+// Изменить ТОЛЬКО эту конкретную дату: исключаем дату из серии и превращаем именно это
+// повторение в обычный подтверждённый созвон (request) с новыми параметрами — дальше это
+// уже отдельная встреча, которую можно редактировать/удалять независимо от серии.
+function editRecurringOccurrenceOnly(rec, date, payload) {
+    commit(s => {
+        const r = s.recurring.find(x => x.id === rec.id);
+        if (r) r.excludedDates = Array.isArray(r.excludedDates) ? [...r.excludedDates, date] : [date];
+        const attendees = payload.attendees;
+        const responses = {};
+        attendees.forEach(a => { responses[a] = "accepted"; });
+        const newReq = {
+            id: "e_" + Date.now().toString(36) + Math.random().toString(36).slice(2, 5),
+            title: payload.title, date: payload.date, startTime: payload.startTime, duration: payload.duration,
+            attendees, zoomNeeded: payload.zoomNeeded, zoomLink: payload.zoomLink,
+            notes: payload.notes || "", createdBy: me, status: "confirmed", responses,
+            zoomSetupDone: !!(payload.zoomLink && payload.zoomLink.trim())
+        };
+        s.requests.push(newReq);
+        const slots = slotsForRange(newReq.startTime, newReq.duration);
+        newReq.attendees.forEach(pid => {
+            slots.forEach(t => { s.busySlots.push({ id: "b_" + Date.now().toString(36) + Math.random().toString(36).slice(2, 5), personId: pid, date: newReq.date, time: t, type: "event", label: newReq.title, requestId: newReq.id }); });
+        });
+        if (newReq.zoomNeeded) {
+            slots.forEach(t => { s.zoomSlots.push({ id: "z_" + Date.now().toString(36) + Math.random().toString(36).slice(2, 5), date: newReq.date, time: t, kind: "event", label: newReq.title, requestId: newReq.id }); });
+        }
+        return s;
+    });
+    flash("Изменено только это событие");
+}
+// Изменить эту и все СЛЕДУЮЩИЕ даты: закрываем старую серию датой (until = date, как при
+// удалении "и все последующие"), и заводим новую серию с новыми параметрами, которая
+// начинает действовать именно с этой даты (since) — прошлые повторения не трогаем.
+function editRecurringFromDate(rec, date, payload) {
+    commit(s => {
+        const r = s.recurring.find(x => x.id === rec.id);
+        if (r) r.until = date;
+        s.recurring.push({ ...payload, id: "r_" + Date.now().toString(36), since: date });
+        return s;
+    });
+    flash("Изменено это и все следующие повторения");
+}
   function updateRequestDetails(id, payload) {
         commit(s => {
             const r = s.requests.find(x => x.id === id);
@@ -899,6 +949,7 @@ if (timeChanged) r.tenMinReminded = false;
         const wd = weekdayOfDate(ds);
 const recCount = state.recurring.filter(r => r.weekday === wd
     && !(r.until && ds >= r.until)
+    && !(r.since && ds < r.since)
     && !(Array.isArray(r.excludedDates) && r.excludedDates.includes(ds))).length;
       const pending = state.requests.filter(r => r.date === ds && r.status === "pending").length;
         const vacationCount = state.dayOffs.filter(o => o.date === ds && o.type === "vacation").length;
@@ -1013,7 +1064,45 @@ const recCount = state.recurring.filter(r => r.weekday === wd
     const recFormModal = showRecForm ? React.createElement(RecurringForm, { team: state.team, onClose: () => setShowRecForm(false), onSubmit: addRecurring }) : null;
     const editRecurringModal = editingRecurring ? React.createElement(RecurringForm, { team: state.team, existing: editingRecurring,
         onClose: () => setEditingRecurring(null), onSubmit: (rec) => { updateRecurring(editingRecurring.id, rec); setEditingRecurring(null); } }) : null;
-    const newEventModal = showNewEvent ? React.createElement(NewEventModal, { state, me, isAdmin, selectedDate, seed: rescheduleSeed, onClose: () => { setShowNewEvent(false); setRescheduleSeed(null); }, onSubmit: submitRequest }) : null;
+    const editRecurringChoiceModal = editRecurringChoice ? React.createElement(Modal, { onClose: () => setEditRecurringChoice(null), title: `Изменить «${editRecurringChoice.rec.title}»` },
+        React.createElement("div", { className: "space-y-2" },
+            React.createElement("button", {
+                onClick: () => { const c = editRecurringChoice; setEditRecurringChoice(null); setEditRecurringOccurrence(c); },
+                className: "w-full text-sm px-3 py-2.5 rounded-lg border text-left", style: { borderColor: "var(--border)" }
+            }, `Только эту встречу (${editRecurringChoice.date})`),
+            React.createElement("button", {
+                onClick: () => { const c = editRecurringChoice; setEditRecurringChoice(null); setEditRecurringFollowingSeed(c); },
+                className: "w-full text-sm px-3 py-2.5 rounded-lg border text-left", style: { borderColor: "var(--border)" }
+            }, "Эту и все следующие"),
+            React.createElement("button", {
+                onClick: () => { const c = editRecurringChoice; setEditRecurringChoice(null); setEditingRecurring(c.rec); },
+                className: "w-full text-sm px-3 py-2.5 rounded-lg border text-left", style: { borderColor: "var(--border)" }
+            }, "Всю серию (прошлые и будущие)")
+        )
+    ) : null;
+    const editOccurrenceModal = editRecurringOccurrence ? React.createElement(NewEventModal, {
+        state, me, isAdmin, selectedDate,
+        seed: {
+            title: editRecurringOccurrence.rec.title,
+            date: editRecurringOccurrence.date,
+            startTime: editRecurringOccurrence.rec.startTime,
+            duration: editRecurringOccurrence.rec.durationMin,
+            attendees: editRecurringOccurrence.rec.attendees === "all" ? state.team.map(p => p.id)
+                : editRecurringOccurrence.rec.attendees === "core" ? state.team.filter(p => p.core).map(p => p.id)
+                : editRecurringOccurrence.rec.attendees,
+            zoomNeeded: !!editRecurringOccurrence.rec.zoom,
+            zoomLink: null,
+            notes: editRecurringOccurrence.rec.notes || ""
+        },
+        onClose: () => setEditRecurringOccurrence(null),
+        onSubmit: (payload) => { editRecurringOccurrenceOnly(editRecurringOccurrence.rec, editRecurringOccurrence.date, payload); setEditRecurringOccurrence(null); }
+    }) : null;
+    const editRecurringFollowingModal = editRecurringFollowingSeed ? React.createElement(RecurringForm, {
+        team: state.team, existing: editRecurringFollowingSeed.rec,
+        onClose: () => setEditRecurringFollowingSeed(null),
+        onSubmit: (rec) => { editRecurringFromDate(editRecurringFollowingSeed.rec, editRecurringFollowingSeed.date, rec); setEditRecurringFollowingSeed(null); }
+    }) : null;
+  const newEventModal = showNewEvent ? React.createElement(NewEventModal, { state, me, isAdmin, selectedDate, seed: rescheduleSeed, onClose: () => { setShowNewEvent(false); setRescheduleSeed(null); }, onSubmit: submitRequest }) : null;
     const editRequestModal = editingRequest ? React.createElement(NewEventModal, { state, me, isAdmin, selectedDate, existing: editingRequest,
         onClose: () => setEditingRequest(null), onSubmit: (payload) => { updateRequestDetails(editingRequest.id, payload); setEditingRequest(null); setViewingSlot(null); } }) : null;
     const createSlotModal = creatingSlot ? React.createElement(EventFormModal, {
@@ -1057,8 +1146,8 @@ const recCount = state.recurring.filter(r => r.weekday === wd
             deleteRequest(id);
             setViewingSlot(null);
         } },
-onEditRecurring: (rec) => { setViewingSlot(null); setEditingRecurring(rec); },
-onDeleteRecurringOccurrence: (rec, date) => {
+onEditRecurring: (rec, date) => { setViewingSlot(null); setEditRecurringChoice({ rec, date }); },
+      onDeleteRecurringOccurrence: (rec, date) => {
     if (confirm(`Удалить «${rec.title}» только на ${date}?`)) {
         deleteRecurringOccurrence(rec.id, date);
         setViewingSlot(null);
@@ -1121,7 +1210,7 @@ const allMeetingsItems = [
     }
   `);
     const toastEl = toast ? React.createElement("div", { className: "fixed top-4 left-1/2 -translate-x-1/2 z-50 px-4 py-2 rounded-lg shadow-lg text-sm", style: { background: "var(--ink)", color: "#fff" } }, toast) : null;
-return React.createElement("div", { className: "w-full", style: { fontFamily: "var(--font-body)", background: "var(--bg)", color: "var(--ink)", minHeight: "100%" } }, globalStyleEl, toastEl, headerEl, bodyEl, addPersonModal, recFormModal, editRecurringModal, newEventModal, editRequestModal, createSlotModal, editEventModal, viewSlotModal, inboxModal, allMeetingsModal, dayCellChoiceModal);
+return React.createElement("div", { className: "w-full", style: { fontFamily: "var(--font-body)", background: "var(--bg)", color: "var(--ink)", minHeight: "100%" } }, globalStyleEl, toastEl, headerEl, bodyEl, addPersonModal, recFormModal, editRecurringModal, newEventModal, editRequestModal, createSlotModal, editEventModal, viewSlotModal, inboxModal, allMeetingsModal, dayCellChoiceModal, editRecurringChoiceModal, editOccurrenceModal, editRecurringFollowingModal);
 }
 function Gate({ team, onPick, onCreate }) {
     const [name, setName] = useState("");
@@ -1221,7 +1310,7 @@ body = React.createElement("div", { className: "text-sm space-y-2" },
     occ.recurring.notes ? React.createElement("div", { className: "text-xs px-2 py-1.5 rounded", style: { background: "#F8F9FC", color: "var(--ink)" } }, occ.recurring.notes) : null,
     React.createElement("div", { className: "text-xs", style: { color: "var(--ink-soft)" } }, "Регулярная встреча."),
     React.createElement("div", { className: "flex gap-2 pt-1" },
-        React.createElement("button", { onClick: () => onEditRecurring(occ.recurring), className: "flex items-center gap-1 text-xs px-3 py-1.5 rounded-md", style: { background: "var(--accent-soft)", color: "var(--accent)" } }, React.createElement(Pencil, { size: 11 }), "Редактировать"),
+React.createElement("button", { onClick: () => onEditRecurring(occ.recurring, date), className: "flex items-center gap-1 text-xs px-3 py-1.5 rounded-md", style: { background: "var(--accent-soft)", color: "var(--accent)" } }, React.createElement(Pencil, { size: 11 }), "Редактировать"),
         React.createElement("button", { onClick: () => onDeleteRecurringOccurrence(occ.recurring, date), className: "flex items-center gap-1 text-xs px-3 py-1.5 rounded-md", style: { background: "#FBEAEA", color: "#C43D3D" } }, React.createElement(Trash2, { size: 11 }), "Удалить только это"),
         React.createElement("button", { onClick: () => onDeleteRecurringFromDate(occ.recurring, date), className: "flex items-center gap-1 text-xs px-3 py-1.5 rounded-md", style: { background: "#FBEAEA", color: "#C43D3D" } }, React.createElement(Trash2, { size: 11 }), "Это и все последующие")
     )
