@@ -24,7 +24,7 @@ const { useState, useEffect, useCallback, useMemo, useRef } = React;
    НАСТРОЙКА: вставь сюда URL своей Firebase Realtime Database.
    ====================================================================== */
 const DB_URL = "https://calendar-84b06-default-rtdb.europe-west1.firebasedatabase.app";
-const APP_VERSION = "2026-08-25-01"; // меняйте эту строку при каждом деплое — по ней вкладки понимают, что вышла новая версия/* Простые иконки-заглушки без внешних зависимостей */
+const APP_VERSION = "2026-08-25-02"; // меняйте эту строку при каждом деплое — по ней вкладки понимают, что вышла новая версия/* Простые иконки-заглушки без внешних зависимостей */
 function mkIcon(char) {
     return function Icon({ size = 16, color, className, style, ...rest }) {
         return React.createElement("span", {
@@ -1104,7 +1104,7 @@ const noCallButtonEl = React.createElement("button", {
     className: "text-xs px-2.5 py-1.5 rounded-md border flex items-center gap-1 shrink-0",
     style: { borderColor: myNoCallToday ? "#C43D3D" : "var(--border)", background: myNoCallToday ? "#FDEBEA" : "var(--surface)", color: myNoCallToday ? "#C43D3D" : "var(--ink-soft)" }
 }, "🔕", myNoCallToday ? " Не звонить" : " Не звонить сегодня");  
-    const dayPanelEl = React.createElement("div", { className: "rounded-xl border p-3 sm:p-4", style: { borderColor: "var(--border)", background: "var(--surface)" } }, ...
+    const dayPanelEl = React.createElement("div", { className: "rounded-xl border p-3 sm:p-4", style: { borderColor: "var(--border)", background: "var(--surface)" } },
     React.createElement("div", { className: "flex flex-wrap items-center justify-between gap-2 mb-3" },
     React.createElement("div", { className: "disp font-semibold text-sm sm:text-base" }, `${selectedDate} · ${WEEKDAYS[weekdayOfDate(selectedDate)]}`),
     React.createElement("div", { className: "flex items-center gap-2" }, absenceSelectEl, noCallButtonEl)
