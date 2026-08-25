@@ -24,7 +24,7 @@ const { useState, useEffect, useCallback, useMemo, useRef } = React;
    НАСТРОЙКА: вставь сюда URL своей Firebase Realtime Database.
    ====================================================================== */
 const DB_URL = "https://calendar-84b06-default-rtdb.europe-west1.firebasedatabase.app";
-const APP_VERSION = "2026-08-21-01"; // меняйте эту строку при каждом деплое — по ней вкладки понимают, что вышла новая версия/* Простые иконки-заглушки без внешних зависимостей */
+const APP_VERSION = "2026-08-25-01"; // меняйте эту строку при каждом деплое — по ней вкладки понимают, что вышла новая версия/* Простые иконки-заглушки без внешних зависимостей */
 function mkIcon(char) {
     return function Icon({ size = 16, color, className, style, ...rest }) {
         return React.createElement("span", {
@@ -185,7 +185,7 @@ function clearSavedMe() { try {
 }
 catch (e) { } }
 function defaultState() {
-    return { team: [], recurring: [], busySlots: [], dayOffs: [], zoomSlots: [], requests: [], busyEvents: [], zoomManagerId: null, notifications: [], lastReminderDate: null };
+    return { team: [], recurring: [], busySlots: [], dayOffs: [], zoomSlots: [], requests: [], busyEvents: [], zoomManagerId: null, notifications: [], lastReminderDate: null, noCallDays: [] };
 }
 // ВАЖНО: возвращает { ok, state, etag }, а не просто state. При любой ошибке чтения
 // (сбой сети, отклонённый запрос и т.п.) функция возвращает ok=false, и вызывающий код
@@ -303,6 +303,13 @@ function isPersonBusyAt(state, personId, date, time) {
     const occ = getOccupant(state, personId, date, time);
     return occ ? { busy: true, ...occ } : { busy: false };
 }
+// ДОБАВИТЬ:
+function getNoCallInfo(state, personId, date) {
+    return (state.noCallDays || []).find(n => n.personId === personId && n.date === date) || null;
+}
+function isNoCallDay(state, personId, date) {
+    return !!getNoCallInfo(state, personId, date);
+}
 function isZoomBusyAt(state, date, time) {
     const wd = weekdayOfDate(date);
     const rec = state.recurring.find(r => r.weekday === wd && r.zoom
@@ -347,6 +354,7 @@ stateRef.current = state; // синхронно обновляется на ка
     const [toast, setToast] = useState("");
     const [creatingSlot, setCreatingSlot] = useState(null); // { date, time }
     const [dayCellChoice, setDayCellChoice] = useState(null); // { date, time } — выбор типа события при клике по пустой ячейке
+    const [noCallNoteDate, setNoCallNoteDate] = useState(null); // дата, для которой открыта форма причины "не звонить"  
     const [viewingSlot, setViewingSlot] = useState(null); // { personId, date, time, occ }
     const [editingEvent, setEditingEvent] = useState(null); // busyEvent being edited
     const [editingRequest, setEditingRequest] = useState(null); // созвон (request), редактируемый админом
@@ -354,8 +362,8 @@ stateRef.current = state; // синхронно обновляется на ка
     const [editRecurringChoice, setEditRecurringChoice] = useState(null); // {rec, date} — выбор масштаба редактирования
     const [editRecurringOccurrence, setEditRecurringOccurrence] = useState(null); // {rec, date} — "только это"
     const [editRecurringFollowingSeed, setEditRecurringFollowingSeed] = useState(null); // {rec, date} — "это и все следующие"
-    const modalOpen = showNewEvent || showInbox || showAddPerson || showRecForm || !!creatingSlot || !!viewingSlot || !!editingEvent || showAllMeetings || !!editingRequest || !!editingRecurring || !!dayCellChoice
-        || !!editRecurringChoice || !!editRecurringOccurrence || !!editRecurringFollowingSeed;
+const modalOpen = showNewEvent || showInbox || showAddPerson || showRecForm || !!creatingSlot || !!viewingSlot || !!editingEvent || showAllMeetings || !!editingRequest || !!editingRecurring || !!dayCellChoice
+    || !!editRecurringChoice || !!editRecurringOccurrence || !!editRecurringFollowingSeed || !!noCallNoteDate;
   const pollRef = useRef(null);
     const modalOpenRef = useRef(false);
     // true только после хотя бы одной УСПЕШНОЙ загрузки состояния с сервера. Пока false —
@@ -483,8 +491,13 @@ function checkDailyDigest() {
                 `🚫 ${tgMention(personName(s.team, e.creatorId))} — ${e.title}, ${e.startTime}–${endTimeFromDuration(e.startTime, e.duration)}`
             )
         ];
-        const parts = [`📅 План на завтра, ${tomorrow}:`, items.length ? items.map(i => i.text).join("\n") : "Созвонов не запланировано."];
+      const noCallItems = (s.noCallDays || []).filter(n => n.date === tomorrow).map(n =>
+    `🔕 ${tgMention(personName(s.team, n.personId))} — не ставить созвоны${n.note ? ` (${n.note})` : ""}`
+);  
+      const parts = [`📅 План на завтра, ${tomorrow}:`, items.length ? items.map(i => i.text).join("\n") : "Созвонов не запланировано."];
         if (absenceItems.length) parts.push("", "Отсутствия:", absenceItems.join("\n"));
+        if (noCallItems.length) parts.push("", "Просьбы не звонить:", noCallItems.join("\n"));
+
         sendTelegram(parts.join("\n"));
     });
 }
@@ -644,6 +657,8 @@ useEffect(() => {
             s.busySlots = s.busySlots.filter(b => b.personId !== id);
             s.dayOffs = s.dayOffs.filter(d => d.personId !== id);
             s.busyEvents = (s.busyEvents || []).filter(e => e.creatorId !== id);
+            // ДОБАВИТЬ:
+            s.noCallDays = (s.noCallDays || []).filter(n => n.personId !== id);
             s.recurring.forEach(r => { if (Array.isArray(r.attendees))
                 r.attendees = r.attendees.filter(a => a !== id); });
             s.requests.forEach(r => { r.attendees = r.attendees.filter(a => a !== id); delete r.responses[id]; });
@@ -687,6 +702,22 @@ useEffect(() => {
     if (type) {
         const t = DAYOFF_TYPES[type] || DAYOFF_TYPES.off;
         sendTelegram(`${t.emoji} ${tgMention(personName(state.team, personId))} не будет на месте ${date} (${t.label.toLowerCase()}, весь день).`);
+    }
+}
+  function setNoCallDay(personId, date, note) {
+    commit(s => {
+        s.noCallDays = s.noCallDays || [];
+        const idx = s.noCallDays.findIndex(n => n.personId === personId && n.date === date);
+        if (note === null) {
+            if (idx >= 0) s.noCallDays.splice(idx, 1);
+        } else {
+            if (idx >= 0) s.noCallDays[idx] = { personId, date, note };
+            else s.noCallDays.push({ personId, date, note });
+        }
+        return s;
+    });
+    if (note) {
+        sendTelegram(`🔕 ${tgMention(personName(state.team, personId))} просит не ставить созвоны ${date}${note && note !== "Не беспокоить" ? ` (${note})` : ""}.`);
     }
 }
     function addRecurring(rec) { commit(s => { s.recurring.push({ ...rec, id: "r_" + Date.now().toString(36) }); return s; }); }
@@ -953,9 +984,10 @@ const recCount = state.recurring.filter(r => r.weekday === wd
     && !(Array.isArray(r.excludedDates) && r.excludedDates.includes(ds))).length;
       const pending = state.requests.filter(r => r.date === ds && r.status === "pending").length;
         const vacationCount = state.dayOffs.filter(o => o.date === ds && o.type === "vacation").length;
-        const sickCount = state.dayOffs.filter(o => o.date === ds && o.type === "sick").length;
-        const zoomLoad = zoomLoadForDay(state, ds);
-        return { recCount, pending, vacationCount, sickCount, zoomLoad };
+    const sickCount = state.dayOffs.filter(o => o.date === ds && o.type === "sick").length;
+    const noCallCount = (state.noCallDays || []).filter(n => n.date === ds).length; // ДОБАВИТЬ
+    const zoomLoad = zoomLoadForDay(state, ds);
+    return { recCount, pending, vacationCount, sickCount, noCallCount, zoomLoad }; // ДОБАВИТЬ noCallCount
     }
     function zoomLoadColor(load) {
         if (load <= 0.001)
@@ -1006,7 +1038,9 @@ const recCount = state.recurring.filter(r => r.weekday === wd
     const headerEl = React.createElement("div", { className: "flex flex-wrap items-center justify-between gap-2 px-3 sm:px-6 py-3 sm:py-4 border-b", style: { borderColor: "var(--border)", background: "var(--surface)" } }, React.createElement("div", { className: "flex items-center gap-2 sm:gap-3" }, React.createElement("div", { className: "w-8 h-8 sm:w-9 sm:h-9 rounded-lg flex items-center justify-center shrink-0", style: { background: "var(--accent)" } }, React.createElement(CalendarClock, { size: 18, color: "#fff" })), React.createElement("div", null, React.createElement("div", { className: "disp text-base sm:text-lg font-semibold leading-tight" }, "Кто когда свободен"), React.createElement("div", { className: "text-xs hidden sm:block", style: { color: "var(--ink-soft)" } }, "Общий планировщик команды и Zoom"))), React.createElement("div", { className: "flex flex-wrap items-center gap-1.5 sm:gap-2" }, identityEl, React.createElement("button", { onClick: () => setShowAllMeetings(true), className: "text-xs px-2.5 sm:px-3 py-2 rounded-lg border", style: { borderColor: "var(--border)", color: "var(--ink-soft)" } }, "Все созвоны"), React.createElement("button", { onClick: () => setShowInbox(true), className: "relative w-9 h-9 rounded-lg border flex items-center justify-center shrink-0", style: { borderColor: "var(--border)" } }, React.createElement(Bell, { size: 16 }), notifCount > 0 ? React.createElement("span", { className: "absolute -top-1.5 -right-1.5 text-[10px] w-4 h-4 rounded-full flex items-center justify-center text-white", style: { background: "var(--manual)" } }, notifCount) : null), React.createElement("button", { onClick: refresh, className: "w-9 h-9 rounded-lg border flex items-center justify-center shrink-0", style: { borderColor: "var(--border)" } }, React.createElement(RefreshCw, { size: 15 })), React.createElement("button", { onClick: exportBackup, title: "Скачать резервную копию всех данных в JSON", className: "w-9 h-9 rounded-lg border flex items-center justify-center shrink-0", style: { borderColor: "var(--border)" } }, React.createElement(Download, { size: 15 })), React.createElement("button", { onClick: () => { setRescheduleSeed(null); setShowNewEvent(true); }, className: "flex items-center gap-1.5 text-xs sm:text-sm px-3 sm:px-3.5 py-2 rounded-lg text-white font-medium", style: { background: "var(--accent)" } }, React.createElement(Plus, { size: 15 }), " Предложить созвон")));
     const teamCardEl = React.createElement("div", { className: "rounded-xl border p-3", style: { borderColor: "var(--border)", background: "var(--surface)" } }, React.createElement("div", { className: "flex items-center justify-between mb-2" }, React.createElement("div", { className: "flex items-center gap-1.5 text-sm font-semibold" }, React.createElement(Users, { size: 14 }), " Команда"), React.createElement("button", { onClick: () => setShowAddPerson(true), className: "text-xs px-2 py-1 rounded-md", style: { background: "var(--accent-soft)", color: "var(--accent)" } }, "+ добавить")), React.createElement("div", { className: "grid grid-cols-2 gap-1.5" }, state.team.length === 0 ? React.createElement("div", { className: "text-xs py-2 col-span-2", style: { color: "var(--ink-soft)" } }, "Пока никого нет — добавь первых участников.") : null, state.team.map(p => React.createElement("div", { key: p.id, className: "tile-btn group rounded-lg px-2 py-1.5 border", style: { borderColor: p.id === me ? "var(--accent)" : "var(--border)", background: p.id === me ? "var(--accent-soft)" : "var(--surface)" } }, React.createElement("div", { className: "flex items-center gap-1.5 text-xs font-medium truncate" }, React.createElement("span", { className: "w-2 h-2 rounded-full shrink-0", style: { background: p.color } }), React.createElement("span", { className: "truncate" }, p.name), state.zoomManagerId === p.id ? React.createElement("span", { title: "Отвечает за настройку Zoom", style: { color: "var(--zoom)" } }, "★") : null, p.core ? React.createElement("span", { title: "Основная управленческая группа", style: { color: "var(--accent)" } }, "◆") : null), React.createElement("div", { className: "flex items-center gap-2 mt-1 opacity-0 group-hover:opacity-100" }, React.createElement("button", { onClick: () => setZoomManager(p.id), title: "Ответственный за Zoom", className: "text-[10px]", style: { color: state.zoomManagerId === p.id ? "var(--zoom)" : "var(--ink-soft)" } }, "★ Zoom"), React.createElement("button", { onClick: () => toggleCoreMember(p.id), title: "Основная команда", className: "text-[10px]", style: { color: p.core ? "var(--accent)" : "var(--ink-soft)" } }, "◆ группа"), React.createElement("button", { onClick: () => removePerson(p.id), className: "text-[10px] ml-auto", style: { color: "var(--ink-soft)" } }, React.createElement(Trash2, { size: 11 })))))));
     const recurringCardEl = React.createElement("div", { className: "rounded-xl border p-3", style: { borderColor: "var(--border)", background: "var(--surface)" } }, React.createElement("div", { className: "flex items-center justify-between mb-2" }, React.createElement("div", { className: "text-sm font-semibold" }, "Регулярные встречи"), React.createElement("button", { onClick: () => setShowRecForm(true), className: "text-xs px-2 py-1 rounded-md", style: { background: "var(--accent-soft)", color: "var(--accent)" } }, "+ добавить")), React.createElement("div", { className: "space-y-1.5 max-h-56 overflow-y-auto scrollbar-thin" }, state.recurring.length === 0 ? React.createElement("div", { className: "text-xs py-2", style: { color: "var(--ink-soft)" } }, "Планёрки и еженедельные созвоны появятся здесь.") : null, state.recurring.map(r => React.createElement("div", { key: r.id, className: "text-xs px-2 py-1.5 rounded-md flex items-start justify-between gap-1", style: { background: "#F8F9FC" } }, React.createElement("div", null, React.createElement("div", { className: "font-medium", style: { color: "var(--recurring)" } }, r.title), React.createElement("div", { className: "mono", style: { color: "var(--ink-soft)" } }, `${WEEKDAYS[r.weekday]} ${r.startTime} · ${r.durationMin} мин ${r.zoom ? "· Zoom" : ""}`)), React.createElement("div", { className: "flex items-center gap-1 shrink-0" }, React.createElement("button", { onClick: () => setEditingRecurring(r), style: { color: "var(--ink-soft)" } }, React.createElement(Pencil, { size: 12 })), React.createElement("button", { onClick: () => removeRecurring(r.id), style: { color: "var(--ink-soft)" } }, React.createElement(X, { size: 12 })))))));
-    const legendCardEl = React.createElement("div", { className: "rounded-xl border p-3 text-xs space-y-1.5", style: { borderColor: "var(--border)", background: "var(--surface)" } }, React.createElement("div", { className: "font-semibold mb-1" }, "Легенда"), React.createElement(LegendRow, { color: "var(--manual)", label: "Личное событие (клик, чтобы посмотреть)" }), React.createElement(LegendRow, { color: "var(--recurring)", label: "Регулярная встреча" }), React.createElement(LegendRow, { color: "var(--event)", label: "Подтверждённый созвон" }), React.createElement("div", { className: "flex items-center gap-2" }, React.createElement("span", { className: "w-2.5 h-2.5 rounded-sm shrink-0", style: { border: "2px dashed var(--pending)", boxSizing: "border-box" } }), React.createElement("span", { style: { color: "var(--ink-soft)" } }, "Созвон предложен, ждёт подтверждения (пунктир)")), React.createElement(LegendRow, { color: "var(--dayoff)", label: "🚫 Нерабочий день" }), React.createElement(LegendRow, { color: "var(--vacation)", label: "🏖️ Отпуск" }), React.createElement(LegendRow, { color: "var(--sick)", label: "🤒 Болею" }), React.createElement(LegendRow, { color: "var(--zoom)", label: "Zoom занят (подтверждено)" }), React.createElement("div", { className: "flex items-center gap-2" }, React.createElement("span", { className: "w-2.5 h-2.5 rounded-sm shrink-0", style: { border: "2px dashed var(--zoom)", background: "var(--zoom-pending)", boxSizing: "border-box" } }), React.createElement("span", { style: { color: "var(--ink-soft)" } }, "Zoom запланирован, но созвон ещё не подтверждён")), React.createElement("div", { className: "pt-1", style: { color: "var(--ink-soft)" } }, "★ у имени в команде — кто отвечает за настройку Zoom."), React.createElement("div", null, "◆ у имени в команде — входит в основную управленческую группу."), React.createElement("div", { className: "pt-1" }, "Полоска под числом в календаре — загруженность Zoom в этот день: зелёная = свободно, оранжевая = частично, красная = почти весь день занят."));
+    const legendCardEl = React.createElement("div", { className: "rounded-xl border p-3 text-xs space-y-1.5", style: { borderColor: "var(--border)", background: "var(--surface)" } }, React.createElement("div", { className: "font-semibold mb-1" }, "Легенда"), React.createElement(LegendRow, { color: "var(--manual)", label: "Личное событие (клик, чтобы посмотреть)" }), React.createElement(LegendRow, { color: "var(--recurring)", label: "Регулярная встреча" }), React.createElement(LegendRow, { color: "var(--event)", label: "Подтверждённый созвон" }), React.createElement("div", { className: "flex items-center gap-2" }, React.createElement("span", { className: "w-2.5 h-2.5 rounded-sm shrink-0", style: { border: "2px dashed var(--pending)", boxSizing: "border-box" } }), React.createElement("span", { style: { color: "var(--ink-soft)" } }, "Созвон предложен, ждёт подтверждения (пунктир)")), React.createElement(LegendRow, { color: "var(--dayoff)", label: "🚫 Нерабочий день" }), React.createElement(LegendRow, { color: "var(--vacation)", label: "🏖️ Отпуск" }), React.createElement(LegendRow, { color: "var(--sick)", label: "🤒 Болею" }),React.createElement("div", { className: "flex items-center gap-2" },
+    React.createElement("span", { className: "text-[11px]" }, "🔕"),
+    React.createElement("span", { style: { color: "var(--ink-soft)" } }, "Просил(а) не ставить созвоны в этот день")), React.createElement(LegendRow, { color: "var(--zoom)", label: "Zoom занят (подтверждено)" }), React.createElement("div", { className: "flex items-center gap-2" }, React.createElement("span", { className: "w-2.5 h-2.5 rounded-sm shrink-0", style: { border: "2px dashed var(--zoom)", background: "var(--zoom-pending)", boxSizing: "border-box" } }), React.createElement("span", { style: { color: "var(--ink-soft)" } }, "Zoom запланирован, но созвон ещё не подтверждён")), React.createElement("div", { className: "pt-1", style: { color: "var(--ink-soft)" } }, "★ у имени в команде — кто отвечает за настройку Zoom."), React.createElement("div", null, "◆ у имени в команде — входит в основную управленческую группу."), React.createElement("div", { className: "pt-1" }, "Полоска под числом в календаре — загруженность Zoom в этот день: зелёная = свободно, оранжевая = частично, красная = почти весь день занят."));
     const sidebarEl = React.createElement("div", { className: "w-full lg:w-64 shrink-0 space-y-4 order-2 lg:order-1" }, teamCardEl, recurringCardEl, legendCardEl);
     const monthDayButtons = monthCells.map((ds, i) => {
         if (!ds)
@@ -1019,11 +1053,18 @@ const recCount = state.recurring.filter(r => r.weekday === wd
             : React.createElement("span", { className: "text-xs font-medium", style: { color: "var(--ink)" } }, Number(ds.slice(-2)));
         const zoomBarEl = React.createElement("div", { title: zoomLoadLabel(badges.zoomLoad), className: "w-full rounded-full mt-1.5", style: { height: 5, background: "#EEF0F4", overflow: "hidden" } }, React.createElement("div", { style: { height: "100%", width: `${Math.max(6, Math.round(badges.zoomLoad * 100))}%`, background: zoomLoadColor(badges.zoomLoad), borderRadius: 9999 } }));
         return React.createElement("button", { key: ds, onClick: () => setSelectedDate(ds), className: "cell-btn rounded-lg p-1.5 text-left h-16 border",
-            style: { borderColor: isSel ? "var(--accent)" : "var(--border)", background: isSel ? "var(--accent-soft)" : "var(--surface)" } }, dayNumberEl, zoomBarEl, React.createElement("div", { className: "flex gap-1 mt-1 flex-wrap" }, badges.recCount > 0 ? React.createElement("span", { className: "w-1.5 h-1.5 rounded-full", style: { background: "var(--recurring)" } }) : null, badges.pending > 0 ? React.createElement("span", { className: "w-1.5 h-1.5 rounded-full", style: { background: "var(--pending)" } }) : null, badges.vacationCount > 0 ? React.createElement("span", { className: "text-[9px]" }, "🏖️") : null, badges.sickCount > 0 ? React.createElement("span", { className: "text-[9px]" }, "🤒") : null));
+            style: { borderColor: isSel ? "var(--accent)" : "var(--border)", background: isSel ? "var(--accent-soft)" : "var(--surface)" } }, dayNumberEl, zoomBarEl, React.createElement("div", { className: "flex gap-1 mt-1 flex-wrap" }, badges.recCount > 0 ? React.createElement("span", { className: "w-1.5 h-1.5 rounded-full", style: { background: "var(--recurring)" } }) : null, badges.pending > 0 ? React.createElement("span", { className: "w-1.5 h-1.5 rounded-full", style: { background: "var(--pending)" } }) : null, badges.vacationCount > 0 ? React.createElement("span", { className: "text-[9px]" }, "🏖️") : null, badges.sickCount > 0 ? React.createElement("span", { className: "text-[9px]" }, "🤒") : null), badges.noCallCount > 0 ? React.createElement("span", { className: "text-[9px]" }, "🔕") : null));
     });
     const monthCalendarEl = React.createElement("div", { className: "rounded-xl border p-3", style: { borderColor: "var(--border)", background: "var(--surface)" } }, React.createElement("div", { className: "flex items-center justify-between mb-2 px-1" }, React.createElement("button", { onClick: () => setViewYM(v => { const m = v.m - 1; return m < 0 ? { y: v.y - 1, m: 11 } : { y: v.y, m }; }) }, React.createElement(ChevronLeft, { size: 18 })), React.createElement("div", { className: "disp font-semibold capitalize" }, `${MONTHS[viewYM.m]} ${viewYM.y}`), React.createElement("button", { onClick: () => setViewYM(v => { const m = v.m + 1; return m > 11 ? { y: v.y + 1, m: 0 } : { y: v.y, m }; }) }, React.createElement(ChevronRight, { size: 18 }))), React.createElement("div", { className: "grid grid-cols-7 gap-1 text-center text-[11px] mb-1", style: { color: "var(--ink-soft)" } }, WEEKDAYS.map(w => React.createElement("div", { key: w }, w))), React.createElement("div", { className: "grid grid-cols-7 gap-1" }, monthDayButtons));
     const ZOOM_COL_WIDTH = 190;
-    const gridHeaderRow = React.createElement("div", { className: "flex" }, React.createElement("div", { style: { width: 90 } }), state.team.map(p => React.createElement("div", { key: p.id, className: "text-xs font-medium text-center px-1 pb-1.5", style: { width: 84, color: p.color } }, p.name)), React.createElement("div", { key: "zoomhead", className: "text-xs font-medium text-center px-1 pb-1.5 flex items-center justify-center gap-1", style: { width: ZOOM_COL_WIDTH, color: "var(--zoom)", background: "var(--zoom-wash)", borderLeft: "2px solid var(--zoom)" } }, React.createElement(Video, { size: 11 }), "Zoom · кто и что"));
+    const gridHeaderRow = React.createElement("div", { className: "flex" }, React.createElement("div", { style: { width: 90 } }), state.team.map(p => {
+    const noCall = getNoCallInfo(state, p.id, selectedDate);
+    return React.createElement("div", {
+        key: p.id,
+        title: noCall ? `Просил(а) не ставить созвоны${noCall.note ? `: ${noCall.note}` : ""}` : undefined,
+        className: "text-xs font-medium text-center px-1 pb-1.5", style: { width: 84, color: p.color }
+    }, noCall ? "🔕 " : "", p.name);
+}), React.createElement("div", { key: "zoomhead", className: "text-xs font-medium text-center px-1 pb-1.5 flex items-center justify-center gap-1", style: { width: ZOOM_COL_WIDTH, color: "var(--zoom)", background: "var(--zoom-wash)", borderLeft: "2px solid var(--zoom)" } }, React.createElement(Video, { size: 11 }), "Zoom · кто и что"));
     const gridRows = TIME_SLOTS.map(t => {
         const personCells = state.team.map(p => {
             const occ = getOccupant(state, p.id, selectedDate, t);
@@ -1056,7 +1097,18 @@ const recCount = state.recurring.filter(r => r.weekday === wd
         className: "text-xs px-2.5 py-1.5 rounded-md border",
         style: { borderColor: "var(--border)", background: myOffType !== "none" ? (DAYOFF_TYPES[myOffType].color + "22") : "var(--surface)" }
     }, React.createElement("option", { value: "none" }, "🟢 Я работаю"), React.createElement("option", { value: "off" }, "🚫 Нерабочий день"), React.createElement("option", { value: "vacation" }, "🏖️ Отпуск"), React.createElement("option", { value: "sick" }, "🤒 Болею"));
-    const dayPanelEl = React.createElement("div", { className: "rounded-xl border p-3 sm:p-4", style: { borderColor: "var(--border)", background: "var(--surface)" } }, React.createElement("div", { className: "flex flex-wrap items-center justify-between gap-2 mb-3" }, React.createElement("div", { className: "disp font-semibold text-sm sm:text-base" }, `${selectedDate} · ${WEEKDAYS[weekdayOfDate(selectedDate)]}`), absenceSelectEl), dayGridInner, React.createElement("div", { className: "text-[11px] mt-2", style: { color: "var(--ink-soft)" } }, "Клик по пустой ячейке своей колонки — создать событие. Клик по занятой — посмотреть, что там. Колонка Zoom выделена и открыта для всех."));
+  const myNoCallToday = getNoCallInfo(state, me, selectedDate);
+const noCallButtonEl = React.createElement("button", {
+    onClick: () => myNoCallToday ? setNoCallDay(me, selectedDate, null) : setNoCallNoteDate(selectedDate),
+    title: myNoCallToday ? (myNoCallToday.note ? `Причина: ${myNoCallToday.note}` : "Убрать пометку") : "Попросить не ставить мне созвоны в этот день",
+    className: "text-xs px-2.5 py-1.5 rounded-md border flex items-center gap-1 shrink-0",
+    style: { borderColor: myNoCallToday ? "#C43D3D" : "var(--border)", background: myNoCallToday ? "#FDEBEA" : "var(--surface)", color: myNoCallToday ? "#C43D3D" : "var(--ink-soft)" }
+}, "🔕", myNoCallToday ? " Не звонить" : " Не звонить сегодня");  
+    const dayPanelEl = React.createElement("div", { className: "rounded-xl border p-3 sm:p-4", style: { borderColor: "var(--border)", background: "var(--surface)" } }, ...
+    React.createElement("div", { className: "flex flex-wrap items-center justify-between gap-2 mb-3" },
+    React.createElement("div", { className: "disp font-semibold text-sm sm:text-base" }, `${selectedDate} · ${WEEKDAYS[weekdayOfDate(selectedDate)]}`),
+    React.createElement("div", { className: "flex items-center gap-2" }, absenceSelectEl, noCallButtonEl)
+    ), dayGridInner, React.createElement("div", { className: "text-[11px] mt-2", style: { color: "var(--ink-soft)" } }, "Клик по пустой ячейке своей колонки — создать событие. Клик по занятой — посмотреть, что там. Колонка Zoom выделена и открыта для всех."));
     const mainColEl = React.createElement("div", { className: "flex-1 min-w-0 space-y-4 order-1 lg:order-2" }, monthCalendarEl, dayPanelEl);
     const bodyEl = React.createElement("div", { className: "flex flex-col lg:flex-row gap-4 sm:gap-5 p-3 sm:p-5" }, sidebarEl, mainColEl);
     const addPersonModal = showAddPerson ? React.createElement(Modal, { onClose: () => setShowAddPerson(false), title: "Добавить участника" }, React.createElement("input", { autoFocus: true, value: newPersonName, onChange: e => setNewPersonName(e.target.value), onKeyDown: e => e.key === "Enter" && addPerson(newPersonName),
@@ -1102,6 +1154,12 @@ const recCount = state.recurring.filter(r => r.weekday === wd
         onClose: () => setEditRecurringFollowingSeed(null),
         onSubmit: (rec) => { editRecurringFromDate(editRecurringFollowingSeed.rec, editRecurringFollowingSeed.date, rec); setEditRecurringFollowingSeed(null); }
     }) : null;
+  const noCallModal = noCallNoteDate ? React.createElement(Modal, { onClose: () => setNoCallNoteDate(null), title: "Не ставить созвоны" },
+    React.createElement(NoCallForm, {
+        date: noCallNoteDate,
+        onSubmit: (note) => { setNoCallDay(me, noCallNoteDate, note || "Не беспокоить"); setNoCallNoteDate(null); }
+    })
+) : null;
   const newEventModal = showNewEvent ? React.createElement(NewEventModal, { state, me, isAdmin, selectedDate, seed: rescheduleSeed, onClose: () => { setShowNewEvent(false); setRescheduleSeed(null); }, onSubmit: submitRequest }) : null;
     const editRequestModal = editingRequest ? React.createElement(NewEventModal, { state, me, isAdmin, selectedDate, existing: editingRequest,
         onClose: () => setEditingRequest(null), onSubmit: (payload) => { updateRequestDetails(editingRequest.id, payload); setEditingRequest(null); setViewingSlot(null); } }) : null;
@@ -1210,7 +1268,7 @@ const allMeetingsItems = [
     }
   `);
     const toastEl = toast ? React.createElement("div", { className: "fixed top-4 left-1/2 -translate-x-1/2 z-50 px-4 py-2 rounded-lg shadow-lg text-sm", style: { background: "var(--ink)", color: "#fff" } }, toast) : null;
-return React.createElement("div", { className: "w-full", style: { fontFamily: "var(--font-body)", background: "var(--bg)", color: "var(--ink)", minHeight: "100%" } }, globalStyleEl, toastEl, headerEl, bodyEl, addPersonModal, recFormModal, editRecurringModal, newEventModal, editRequestModal, createSlotModal, editEventModal, viewSlotModal, inboxModal, allMeetingsModal, dayCellChoiceModal, editRecurringChoiceModal, editOccurrenceModal, editRecurringFollowingModal);
+return React.createElement("div", { className: "w-full", style: { fontFamily: "var(--font-body)", background: "var(--bg)", color: "var(--ink)", minHeight: "100%" } }, globalStyleEl, toastEl, headerEl, bodyEl, addPersonModal, recFormModal, editRecurringModal, newEventModal, editRequestModal, createSlotModal, editEventModal, viewSlotModal, inboxModal, allMeetingsModal, dayCellChoiceModal, editRecurringChoiceModal, editOccurrenceModal, editRecurringFollowingModal, noCallModal);
 }
 function Gate({ team, onPick, onCreate }) {
     const [name, setName] = useState("");
@@ -1226,6 +1284,25 @@ function ZoomTaskCard({ req, team, onDone }) {
     const [link, setLink] = useState(req.zoomLink || "");
     return React.createElement("div", { className: "border rounded-lg p-3 mb-2", style: { borderColor: "var(--zoom)", background: "var(--zoom-wash)" } }, React.createElement("div", { className: "font-medium text-sm flex items-center gap-1.5" }, React.createElement(Video, { size: 12, color: "var(--zoom)" }), req.title), React.createElement("div", { className: "mono text-xs mt-0.5", style: { color: "var(--ink-soft)" } }, `${req.date} · ${req.startTime} · ${req.duration} мин`), React.createElement("div", { className: "text-xs mt-1", style: { color: "var(--ink-soft)" } }, "Участники: " + req.attendees.map(a => personName(team, a)).join(", ")), React.createElement("input", { value: link, onChange: e => setLink(e.target.value), placeholder: "Вставь ссылку на Zoom-встречу",
         className: "w-full border rounded-lg px-3 py-1.5 mt-2 text-xs", style: { borderColor: "var(--border)" } }), React.createElement("button", { onClick: () => onDone(req.id, link), className: "flex items-center gap-1 text-xs px-3 py-1.5 rounded-md text-white mt-2", style: { background: "var(--zoom)" } }, React.createElement(Check, { size: 12 }), "Готово: встреча в Zoom создана, ссылка в чате"));
+}
+function NoCallForm({ date, onSubmit }) {
+    const [note, setNote] = useState("");
+    return React.createElement("div", { className: "space-y-3 text-sm" },
+        React.createElement("div", { className: "mono text-xs px-3 py-2 border rounded-lg", style: { borderColor: "var(--border)", color: "var(--ink-soft)" } }, date),
+        React.createElement("div", null,
+            React.createElement("label", { className: "text-xs", style: { color: "var(--ink-soft)" } }, "Причина (необязательно)"),
+            React.createElement("input", {
+                autoFocus: true, value: note, onChange: e => setNote(e.target.value),
+                onKeyDown: e => e.key === "Enter" && onSubmit(note.trim()),
+                placeholder: "Например: занят(а), встреча вне офиса...",
+                className: "w-full border rounded-lg px-3 py-2 mt-1", style: { borderColor: "var(--border)" }
+            })
+        ),
+        React.createElement("button", {
+            onClick: () => onSubmit(note.trim()),
+            className: "w-full py-2 rounded-lg text-white text-sm font-medium", style: { background: "#C43D3D" }
+        }, "🔕 Не ставить мне созвоны в этот день")
+    );
 }
 function LegendRow({ color, label }) {
     return React.createElement("div", { className: "flex items-center gap-2" }, React.createElement("span", { className: "w-2.5 h-2.5 rounded-sm shrink-0", style: { background: color } }), React.createElement("span", { style: { color: "var(--ink-soft)" } }, label));
@@ -1358,16 +1435,75 @@ function NewEventModal({ state, me, isAdmin, selectedDate, seed, existing, onClo
     const [notes, setNotes] = useState(src ? (src.notes || "") : "");
     const coreIds = state.team.filter(p => p.core).map(p => p.id);
     const covered = slotsForRange(startTime, duration);
+
+    // Кто просил не ставить созвоны на выбранную дату — пересчитывается при смене даты.
+    const blockedIds = useMemo(
+        () => state.team.filter(p => isNoCallDay(state, p.id, date)).map(p => p.id),
+        [state.team, state.noCallDays, date]
+    );
+    // При смене даты автоматически убираем из участников тех, кто заблокирован на новую дату.
+    useEffect(() => {
+        setAttendees(prev => prev.filter(id => !blockedIds.includes(id)));
+    }, [date]);
+
     const preview = state.team.filter(p => attendees.includes(p.id)).map(p => {
         const busy = covered.some(t => isPersonBusyAt(state, p.id, date, t).busy);
         return { ...p, busy };
     });
     const zoomBusy = zoomNeeded && covered.some(t => isZoomBusyAt(state, date, t).busy);
-    return React.createElement(Modal, { title: existing ? "Редактировать созвон" : "Предложить созвон", onClose, wide: true }, React.createElement("div", { className: "space-y-3 text-sm" }, existing ? React.createElement("div", { className: "text-xs px-2 py-1.5 rounded", style: { background: "var(--accent-soft)", color: "var(--accent)" } }, "Редактирование созвона. Изменения вступят в силу сразу — созвон остаётся подтверждённым.") : null, React.createElement("div", null, React.createElement("label", { className: "text-xs", style: { color: "var(--ink-soft)" } }, "Тема"), React.createElement("input", { value: title, onChange: e => setTitle(e.target.value), className: "w-full border rounded-lg px-3 py-2 mt-1", style: { borderColor: "var(--border)" } })), React.createElement("div", { className: "flex flex-wrap gap-2 items-end" }, React.createElement("div", { className: "flex-1 min-w-[130px]" }, React.createElement("label", { className: "text-xs", style: { color: "var(--ink-soft)" } }, "Дата"), React.createElement("input", { type: "date", value: date, onChange: e => setDate(e.target.value), className: "w-full border rounded-lg px-3 py-2 mt-1", style: { borderColor: "var(--border)" } })), React.createElement("div", { className: "flex-1 min-w-[110px]" }, React.createElement("label", { className: "text-xs", style: { color: "var(--ink-soft)" } }, "Начало"), React.createElement("select", { value: startTime, onChange: e => onStartChange(e.target.value), className: "w-full border rounded-lg px-3 py-2 mt-1", style: { borderColor: "var(--border)" } }, TIME_SLOTS.map(t => React.createElement("option", { key: t, value: t }, t)))), React.createElement("div", { className: "flex-1 min-w-[110px]" }, React.createElement("label", { className: "text-xs", style: { color: "var(--ink-soft)" } }, "Окончание"), React.createElement("select", { value: endTime, onChange: e => onEndChange(e.target.value), className: "w-full border rounded-lg px-3 py-2 mt-1", style: { borderColor: "var(--border)" } }, endOptionsAfter(startTime).map(t => React.createElement("option", { key: t, value: t }, t)))), React.createElement("div", { className: "text-xs pb-2", style: { color: "var(--ink-soft)", whiteSpace: "nowrap" } }, `${duration} мин`)), React.createElement("div", null, React.createElement("div", { className: "flex items-center justify-between" }, React.createElement("label", { className: "text-xs", style: { color: "var(--ink-soft)" } }, "Участники"), coreIds.length > 0 ? React.createElement("button", { onClick: () => setAttendees(coreIds), className: "text-[11px] px-2 py-0.5 rounded-md", style: { background: "var(--accent-soft)", color: "var(--accent)" } }, "◆ Основная команда") : null), React.createElement("div", { className: "flex flex-wrap gap-1.5 mt-1" }, state.team.map(p => React.createElement("button", { key: p.id, onClick: () => setAttendees(prev => prev.includes(p.id) ? prev.filter(x => x !== p.id) : [...prev, p.id]),
-        className: "text-xs px-2 py-1 rounded-full border", style: { borderColor: attendees.includes(p.id) ? p.color : "var(--border)", background: attendees.includes(p.id) ? p.color + "22" : "transparent" } }, p.name)))), React.createElement("div", null, React.createElement("label", { className: "text-xs", style: { color: "var(--ink-soft)" } }, "Комментарий / доп. информация"), React.createElement("textarea", { value: notes, onChange: e => setNotes(e.target.value), rows: 2, placeholder: "Что за созвон, кто задействован, что ожидается…",
-        className: "w-full border rounded-lg px-3 py-2 mt-1 text-sm", style: { borderColor: "var(--border)", resize: "vertical" } })), React.createElement("label", { className: "flex items-center gap-2 text-xs" }, React.createElement("input", { type: "checkbox", checked: zoomNeeded, onChange: e => setZoomNeeded(e.target.checked) }), " Нужен Zoom"), zoomNeeded && React.createElement("div", null, React.createElement("label", { className: "text-xs", style: { color: "var(--ink-soft)" } }, "Ссылка на Zoom (если уже есть — необязательно)"), React.createElement("input", { value: zoomLink, onChange: e => setZoomLink(e.target.value), placeholder: "https://zoom.us/j/...",
-        className: "w-full border rounded-lg px-3 py-2 mt-1 text-sm", style: { borderColor: "var(--border)" } }), React.createElement("div", { className: "text-[11px] mt-1", style: { color: "var(--ink-soft)" } }, "Если оставить пустым — задача добавить ссылку упадёт ответственному за Zoom после того, как все подтвердят участие.")), React.createElement("div", { className: "rounded-lg p-3", style: { background: "#F8F9FC" } }, React.createElement("div", { className: "text-xs font-semibold mb-2", style: { color: "var(--ink-soft)" } }, "ДОСТУПНОСТЬ НА ВЫБРАННОЕ ВРЕМЯ"), preview.length === 0 && React.createElement("div", { className: "text-xs", style: { color: "var(--ink-soft)" } }, "Выбери участников."), React.createElement("div", { className: "flex flex-wrap gap-2" }, preview.map(p => React.createElement("span", { key: p.id, className: "text-xs px-2 py-1 rounded-md flex items-center gap-1.5", style: { background: p.busy ? "#FBEAEA" : "#E4F7EE", color: p.busy ? "#C43D3D" : "#1E7A46" } }, React.createElement("span", { className: "w-1.5 h-1.5 rounded-full", style: { background: p.busy ? "#C43D3D" : "#1E7A46" } }), p.name)), zoomNeeded && React.createElement("span", { className: "text-xs px-2 py-1 rounded-md flex items-center gap-1.5", style: { background: zoomBusy ? "#FBEAEA" : "#E4F7EE", color: zoomBusy ? "#C43D3D" : "#1E7A46" } }, React.createElement(Video, { size: 11 }), "Zoom"))), React.createElement("button", { disabled: !me || attendees.length === 0, onClick: () => onSubmit({ title, date, startTime, duration, attendees, zoomNeeded, zoomLink: zoomLink.trim() || null, notes: notes.trim(), instant }),
-        className: "w-full py-2 rounded-lg text-white text-sm font-medium disabled:opacity-40", style: { background: "var(--accent)" } }, existing ? "Сохранить изменения" : "Создать и подтвердить")));
+    const hasBlockedAttendee = attendees.some(id => blockedIds.includes(id));
+
+    return React.createElement(Modal, { title: existing ? "Редактировать созвон" : "Предложить созвон", onClose, wide: true }, React.createElement("div", { className: "space-y-3 text-sm" },
+        existing ? React.createElement("div", { className: "text-xs px-2 py-1.5 rounded", style: { background: "var(--accent-soft)", color: "var(--accent)" } }, "Редактирование созвона. Изменения вступят в силу сразу — созвон остаётся подтверждённым.") : null,
+        React.createElement("div", null, React.createElement("label", { className: "text-xs", style: { color: "var(--ink-soft)" } }, "Тема"), React.createElement("input", { value: title, onChange: e => setTitle(e.target.value), className: "w-full border rounded-lg px-3 py-2 mt-1", style: { borderColor: "var(--border)" } })),
+        React.createElement("div", { className: "flex flex-wrap gap-2 items-end" },
+            React.createElement("div", { className: "flex-1 min-w-[130px]" }, React.createElement("label", { className: "text-xs", style: { color: "var(--ink-soft)" } }, "Дата"), React.createElement("input", { type: "date", value: date, onChange: e => setDate(e.target.value), className: "w-full border rounded-lg px-3 py-2 mt-1", style: { borderColor: "var(--border)" } })),
+            React.createElement("div", { className: "flex-1 min-w-[110px]" }, React.createElement("label", { className: "text-xs", style: { color: "var(--ink-soft)" } }, "Начало"), React.createElement("select", { value: startTime, onChange: e => onStartChange(e.target.value), className: "w-full border rounded-lg px-3 py-2 mt-1", style: { borderColor: "var(--border)" } }, TIME_SLOTS.map(t => React.createElement("option", { key: t, value: t }, t)))),
+            React.createElement("div", { className: "flex-1 min-w-[110px]" }, React.createElement("label", { className: "text-xs", style: { color: "var(--ink-soft)" } }, "Окончание"), React.createElement("select", { value: endTime, onChange: e => onEndChange(e.target.value), className: "w-full border rounded-lg px-3 py-2 mt-1", style: { borderColor: "var(--border)" } }, endOptionsAfter(startTime).map(t => React.createElement("option", { key: t, value: t }, t)))),
+            React.createElement("div", { className: "text-xs pb-2", style: { color: "var(--ink-soft)", whiteSpace: "nowrap" } }, `${duration} мин`)
+        ),
+        React.createElement("div", null,
+            React.createElement("div", { className: "flex items-center justify-between" },
+                React.createElement("label", { className: "text-xs", style: { color: "var(--ink-soft)" } }, "Участники"),
+                coreIds.length > 0 ? React.createElement("button", {
+                    onClick: () => setAttendees(coreIds.filter(id => !blockedIds.includes(id))),
+                    className: "text-[11px] px-2 py-0.5 rounded-md", style: { background: "var(--accent-soft)", color: "var(--accent)" }
+                }, "◆ Основная команда") : null
+            ),
+            React.createElement("div", { className: "flex flex-wrap gap-1.5 mt-1" }, state.team.map(p => {
+                const blocked = blockedIds.includes(p.id);
+                const noCall = blocked ? getNoCallInfo(state, p.id, date) : null;
+                return React.createElement("button", {
+                    key: p.id,
+                    disabled: blocked,
+                    onClick: () => !blocked && setAttendees(prev => prev.includes(p.id) ? prev.filter(x => x !== p.id) : [...prev, p.id]),
+                    title: blocked ? `${p.name} просил(а) не ставить созвоны в этот день${noCall && noCall.note ? `: ${noCall.note}` : ""}` : undefined,
+                    className: "text-xs px-2 py-1 rounded-full border" + (blocked ? " opacity-40 cursor-not-allowed" : ""),
+                    style: { borderColor: attendees.includes(p.id) ? p.color : "var(--border)", background: attendees.includes(p.id) ? p.color + "22" : "transparent" }
+                }, blocked ? "🔕 " : "", p.name);
+            })),
+            hasBlockedAttendee ? React.createElement("div", { className: "text-xs mt-1.5", style: { color: "#C43D3D" } },
+                "Кто-то из участников просил не ставить созвоны в этот день — уберите его перед сохранением.") : null
+        ),
+        React.createElement("div", null, React.createElement("label", { className: "text-xs", style: { color: "var(--ink-soft)" } }, "Комментарий / доп. информация"), React.createElement("textarea", { value: notes, onChange: e => setNotes(e.target.value), rows: 2, placeholder: "Что за созвон, кто задействован, что ожидается…",
+            className: "w-full border rounded-lg px-3 py-2 mt-1 text-sm", style: { borderColor: "var(--border)", resize: "vertical" } })),
+        React.createElement("label", { className: "flex items-center gap-2 text-xs" }, React.createElement("input", { type: "checkbox", checked: zoomNeeded, onChange: e => setZoomNeeded(e.target.checked) }), " Нужен Zoom"),
+        zoomNeeded && React.createElement("div", null, React.createElement("label", { className: "text-xs", style: { color: "var(--ink-soft)" } }, "Ссылка на Zoom (если уже есть — необязательно)"), React.createElement("input", { value: zoomLink, onChange: e => setZoomLink(e.target.value), placeholder: "https://zoom.us/j/...",
+            className: "w-full border rounded-lg px-3 py-2 mt-1 text-sm", style: { borderColor: "var(--border)" } }), React.createElement("div", { className: "text-[11px] mt-1", style: { color: "var(--ink-soft)" } }, "Если оставить пустым — задача добавить ссылку упадёт ответственному за Zoom после того, как все подтвердят участие.")),
+        React.createElement("div", { className: "rounded-lg p-3", style: { background: "#F8F9FC" } },
+            React.createElement("div", { className: "text-xs font-semibold mb-2", style: { color: "var(--ink-soft)" } }, "ДОСТУПНОСТЬ НА ВЫБРАННОЕ ВРЕМЯ"),
+            preview.length === 0 && React.createElement("div", { className: "text-xs", style: { color: "var(--ink-soft)" } }, "Выбери участников."),
+            React.createElement("div", { className: "flex flex-wrap gap-2" },
+                preview.map(p => React.createElement("span", { key: p.id, className: "text-xs px-2 py-1 rounded-md flex items-center gap-1.5", style: { background: p.busy ? "#FBEAEA" : "#E4F7EE", color: p.busy ? "#C43D3D" : "#1E7A46" } }, React.createElement("span", { className: "w-1.5 h-1.5 rounded-full", style: { background: p.busy ? "#C43D3D" : "#1E7A46" } }), p.name)),
+                zoomNeeded && React.createElement("span", { className: "text-xs px-2 py-1 rounded-md flex items-center gap-1.5", style: { background: zoomBusy ? "#FBEAEA" : "#E4F7EE", color: zoomBusy ? "#C43D3D" : "#1E7A46" } }, React.createElement(Video, { size: 11 }), "Zoom")
+            ),
+            React.createElement("button", {
+                disabled: !me || attendees.length === 0 || hasBlockedAttendee,
+                onClick: () => onSubmit({ title, date, startTime, duration, attendees, zoomNeeded, zoomLink: zoomLink.trim() || null, notes: notes.trim(), instant }),
+                className: "w-full py-2 rounded-lg text-white text-sm font-medium disabled:opacity-40", style: { background: "var(--accent)" }
+            }, existing ? "Сохранить изменения" : "Создать и подтвердить")
+        )
+    ));
 }
 const root = ReactDOM.createRoot(document.getElementById("root"));
 root.render(React.createElement(App));
