@@ -24,7 +24,7 @@ const { useState, useEffect, useCallback, useMemo, useRef } = React;
    НАСТРОЙКА: вставь сюда URL своей Firebase Realtime Database.
    ====================================================================== */
 const DB_URL = "https://calendar-84b06-default-rtdb.europe-west1.firebasedatabase.app";
-const APP_VERSION = "2026-08-25-07"; // меняйте эту строку при каждом деплое — по ней вкладки понимают, что вышла новая версия/* Простые иконки-заглушки без внешних зависимостей */
+const APP_VERSION = "2026-08-27-01"; // меняйте эту строку при каждом деплое — по ней вкладки понимают, что вышла новая версия/* Простые иконки-заглушки без внешних зависимостей */
 function mkIcon(char) {
     return function Icon({ size = 16, color, className, style, ...rest }) {
         return React.createElement("span", {
@@ -78,6 +78,32 @@ function tgMention(name) {
     const nick = TELEGRAM_USERNAMES[name];
     return nick ? `@${nick}` : name;
 }
+
+function linkifyText(text) {
+    if (!text) return null;
+
+    const parts = text.split(/(https?:\/\/[^\s<]+)/g);
+
+    return parts.map((part, i) => {
+        if (/^https?:\/\//i.test(part)) {
+            return React.createElement(
+                "a",
+                {
+                    key: i,
+                    href: part,
+                    target: "_blank",
+                    rel: "noreferrer",
+                    className: "underline",
+                    style: { color: "var(--accent)" }
+                },
+                part
+            );
+        }
+
+        return React.createElement(React.Fragment, { key: i }, part);
+    });
+}
+  
 // Эльза отвечает за добавление ссылок на Zoom — если созвону нужен Zoom, а ссылки ещё нет,
 // её тегают в уведомлении с просьбой добавить ссылку. Имя жёстко задано здесь, а не завязано
 // на "★ ответственный за Zoom" в команде, чтобы тег на Эльзу приходил всегда, независимо от
@@ -1219,7 +1245,7 @@ onDeleteRecurringFromDate: (rec, date) => {
 }
     }) : null;
     const zoomLinkRow = (link) => link ? React.createElement("a", { href: link, target: "_blank", rel: "noreferrer", className: "text-xs mt-1 flex items-center gap-1 underline", style: { color: "var(--accent)" } }, React.createElement(Video, { size: 10 }), link) : null;
-    const notesRow = (notes) => notes ? React.createElement("div", { className: "text-xs mt-1 px-2 py-1 rounded", style: { background: "#F8F9FC", color: "var(--ink)" } }, notes) : null;
+    const notesRow = (notes) => notes ? React.createElement("div", { className: "text-xs mt-1 px-2 py-1 rounded", style: { background: "#F8F9FC", color: "var(--ink)" } }, linkifyText(notes)) : null;
     const inboxItems = myInbox.map(r => React.createElement("div", { key: r.id, className: "border rounded-lg p-3 mb-2", style: { borderColor: "var(--border)" } }, React.createElement("div", { className: "flex items-center justify-between" }, React.createElement("div", { className: "font-medium text-sm" }, r.title), React.createElement("button", { onClick: () => { setShowInbox(false); setEditingRequest(r); }, title: "Редактировать", style: { color: "var(--accent)" } }, React.createElement(Pencil, { size: 13 }))), React.createElement("div", { className: "mono text-xs mt-0.5", style: { color: "var(--ink-soft)" } }, `${r.date} · ${r.startTime} · ${r.duration} мин ${r.zoomNeeded ? "· Zoom" : ""}`), React.createElement("div", { className: "text-xs mt-1", style: { color: "var(--ink-soft)" } }, "Участники: " + r.attendees.map(a => personName(state.team, a)).join(", ")), zoomLinkRow(r.zoomLink), notesRow(r.notes), React.createElement("div", { className: "flex gap-2 mt-2" }, React.createElement("button", { onClick: () => respond(r.id, "accepted"), className: "flex items-center gap-1 text-xs px-3 py-1.5 rounded-md text-white", style: { background: "var(--event)" } }, React.createElement(Check, { size: 12 }), "Приму участие"), React.createElement("button", { onClick: () => respond(r.id, "declined"), className: "flex items-center gap-1 text-xs px-3 py-1.5 rounded-md", style: { background: "#FBEAEA", color: "#C43D3D" } }, React.createElement(X, { size: 12 }), "Не смогу"))));
     const outboxItems = myOutbox.map(r => { const canEdit = true; const canDelete = true; return React.createElement("div", { key: r.id, className: "border rounded-lg p-3 mb-2", style: { borderColor: "var(--border)" } }, React.createElement("div", { className: "flex items-center justify-between" }, React.createElement("div", { className: "font-medium text-sm" }, r.title), React.createElement("div", { className: "flex items-center gap-2" }, React.createElement(StatusPill, { status: r.status }), canEdit ? React.createElement("button", { onClick: () => { setShowInbox(false); setEditingRequest(r); }, title: "Редактировать", style: { color: "var(--accent)" } }, React.createElement(Pencil, { size: 13 })) : null, canDelete ? React.createElement("button", { onClick: () => { if (confirm("Удалить эту встречу без возможности восстановить?"))
             deleteRequest(r.id); }, title: "Удалить", style: { color: "#C43D3D" } }, React.createElement(Trash2, { size: 13 })) : null)), React.createElement("div", { className: "mono text-xs mt-0.5", style: { color: "var(--ink-soft)" } }, `${r.date} · ${r.startTime} · ${r.duration} мин`), React.createElement("div", { className: "text-xs mt-1", style: { color: "var(--ink-soft)" } }, r.attendees.map(a => `${personName(state.team, a)}: ${r.responses[a] === "accepted" ? "✓" : r.responses[a] === "declined" ? "✗" : "…"}`).join("  ")), zoomLinkRow(r.zoomLink), notesRow(r.notes), r.zoomNeeded ? React.createElement("div", { className: "text-xs mt-1 flex items-center gap-1", style: { color: r.zoomSetupDone ? "#1E7A46" : "var(--zoom)" } }, React.createElement(Video, { size: 10 }), r.zoomSetupDone ? "Zoom настроен, ссылка в чате" : `Ждём: ${state.zoomManagerId ? personName(state.team, state.zoomManagerId) : "не назначен ответственный"} добавит встречу в Zoom`) : null); });
@@ -1384,7 +1410,7 @@ function ViewOccupantModal({ team, me, isAdmin, slot, onClose, onEdit, onDelete,
         title = occ.recurring.title;
 body = React.createElement("div", { className: "text-sm space-y-2" },
     React.createElement("div", null, `${WEEKDAYS[occ.recurring.weekday]}, ${occ.recurring.startTime} · ${occ.recurring.durationMin} мин`),
-    occ.recurring.notes ? React.createElement("div", { className: "text-xs px-2 py-1.5 rounded", style: { background: "#F8F9FC", color: "var(--ink)" } }, occ.recurring.notes) : null,
+    occ.recurring.notes ? React.createElement("div", { className: "text-xs px-2 py-1.5 rounded", style: { background: "#F8F9FC", color: "var(--ink)" } }, linkifyText(occ.recurring.notes)) : null,
     React.createElement("div", { className: "text-xs", style: { color: "var(--ink-soft)" } }, "Регулярная встреча."),
     React.createElement("div", { className: "flex gap-2 pt-1" },
 React.createElement("button", { onClick: () => onEditRecurring(occ.recurring, date), className: "flex items-center gap-1 text-xs px-3 py-1.5 rounded-md", style: { background: "var(--accent-soft)", color: "var(--accent)" } }, React.createElement(Pencil, { size: 11 }), "Редактировать"),
