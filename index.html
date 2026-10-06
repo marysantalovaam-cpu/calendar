@@ -24,7 +24,7 @@ const { useState, useEffect, useCallback, useMemo, useRef } = React;
    НАСТРОЙКА: вставь сюда URL своей Firebase Realtime Database.
    ====================================================================== */
 const DB_URL = "https://calendar-84b06-default-rtdb.europe-west1.firebasedatabase.app";
-const APP_VERSION = "2026-10-06-cloudflare-03"; // меняйте эту строку при каждом деплое — по ней вкладки понимают, что вышла новая версия/* Простые иконки-заглушки без внешних зависимостей */
+const APP_VERSION = "2026-10-06-cloudflare-04"; // меняйте эту строку при каждом деплое — по ней вкладки понимают, что вышла новая версия/* Простые иконки-заглушки без внешних зависимостей */
 function mkIcon(char) {
     return function Icon({ size = 16, color, className, style, ...rest }) {
         return React.createElement("span", {
@@ -291,6 +291,39 @@ function withBotJournal(before, after) {
     return saved;
 }
 
+function normalizeSchedulerState(data) {
+    const list = value => (Array.isArray(value)
+        ? value : Object.values(value || {})).filter(Boolean);
+    const state = { ...defaultState(), ...data };
+
+    for (const key of ["team", "recurring", "busySlots", "dayOffs",
+        "zoomSlots", "requests", "busyEvents", "notifications", "noCallDays"]) {
+        state[key] = list(state[key]);
+    }
+    state.requests = state.requests.map(r => ({
+        ...r,
+        attendees: list(r.attendees),
+        responses: r.responses && typeof r.responses === "object"
+            && !Array.isArray(r.responses) ? { ...r.responses } : {}
+    }));
+    state.recurring = state.recurring.map(r => ({
+        ...r,
+        attendees: r.attendees === "all" || r.attendees === "core"
+            ? r.attendees : list(r.attendees),
+        excludedDates: list(r.excludedDates)
+    }));
+    state.busyEvents = state.busyEvents.map(e => ({
+        ...e, participants: list(e.participants)
+    }));
+    state.notifications = state.notifications.map(n => ({
+        ...n,
+        attendees: list(n.attendees),
+        recipients: list(n.recipients),
+        dismissedBy: list(n.dismissedBy)
+    }));
+    return state;
+}
+  
 async function loadState() {
     try {
         const res = await fetch(`${DB_URL}/${STORAGE_KEY}.json`, { headers: { "X-Firebase-ETag": "true" } });
@@ -301,12 +334,19 @@ async function loadState() {
             return { ok: false, state: defaultState(), etag: null };
         }
         const etag = res.headers.get("ETag");
-        const data = await res.json();
-        if (!data || !Array.isArray(data.team) || !data.team.length) {
-            window.__schedulerSaveError && window.__schedulerSaveError("Календарь или команда не найдены в базе. Пустая база не будет создана автоматически.");
+                const data = await res.json();
+        const knownKeys = Object.keys(defaultState());
+        const validRoot = data && typeof data === "object"
+            && !Array.isArray(data)
+            && (knownKeys.some(key => Object.prototype.hasOwnProperty.call(data, key))
+                || Object.prototype.hasOwnProperty.call(data, "botJournalSeq"));
+        if (!validRoot) {
+            window.__schedulerSaveError && window.__schedulerSaveError(
+                "Данные календаря не найдены. Пустая база не будет создана автоматически."
+            );
             return { ok: false, state: defaultState(), etag: null };
         }
-        const loaded = data ? { ...defaultState(), ...data } : defaultState();
+        const loaded = normalizeSchedulerState(data);
         rememberBotBase(etag, loaded);
         return { ok: true, state: loaded, etag };
     }
@@ -615,24 +655,39 @@ useEffect(() => {
         setNewPersonName("");
         setShowAddPerson(false);
     }
-    function removePerson(id) {
-        commit(s => {
+        function removePerson(id) {
+        commit(original => {
+            const s = normalizeSchedulerState(original);
             s.team = s.team.filter(p => p.id !== id);
             s.busySlots = s.busySlots.filter(b => b.personId !== id);
             s.dayOffs = s.dayOffs.filter(d => d.personId !== id);
-            s.busyEvents = (s.busyEvents || []).filter(e => e.creatorId !== id);
-            // ДОБАВИТЬ:
-            s.noCallDays = (s.noCallDays || []).filter(n => n.personId !== id);
-            s.recurring.forEach(r => { if (Array.isArray(r.attendees))
-                r.attendees = r.attendees.filter(a => a !== id); });
-            s.requests.forEach(r => { r.attendees = r.attendees.filter(a => a !== id); delete r.responses[id]; });
+            s.noCallDays = s.noCallDays.filter(n => n.personId !== id);
+            s.busyEvents = s.busyEvents
+                .filter(e => e.creatorId !== id)
+                .map(e => ({ ...e, participants: e.participants.filter(pid => pid !== id) }));
+            s.recurring.forEach(r => {
+                if (Array.isArray(r.attendees))
+                    r.attendees = r.attendees.filter(pid => pid !== id);
+            });
+            s.requests.forEach(r => {
+                r.attendees = r.attendees.filter(pid => pid !== id);
+                delete r.responses[id];
+            });
+            s.notifications.forEach(n => {
+                n.attendees = n.attendees.filter(pid => pid !== id);
+                n.recipients = n.recipients.filter(pid => pid !== id);
+                n.dismissedBy = n.dismissedBy.filter(pid => pid !== id);
+            });
+            if (s.zoomManagerId === id) s.zoomManagerId = null;
             return s;
         });
-        if (me === id) {
+        if (me === id || adminRealId === id) {
             setMeRaw("");
+            setAdminRealId("");
             clearSavedMe();
         }
     }
+
     function toggleZoomSlot(date, time) {
         const info = isZoomBusyAt(state, date, time);
         if (info.busy && info.kind !== "manual") { flash("Занято встречей или предложением созвона"); return; }
