@@ -24,7 +24,7 @@ const { useState, useEffect, useCallback, useMemo, useRef } = React;
    НАСТРОЙКА: вставь сюда URL своей Firebase Realtime Database.
    ====================================================================== */
 const DB_URL = "https://calendar-84b06-default-rtdb.europe-west1.firebasedatabase.app";
-const APP_VERSION = "2026-10-06-cloudflare-01"; // меняйте эту строку при каждом деплое — по ней вкладки понимают, что вышла новая версия/* Простые иконки-заглушки без внешних зависимостей */
+const APP_VERSION = "2026-10-06-cloudflare-02"; // меняйте эту строку при каждом деплое — по ней вкладки понимают, что вышла новая версия/* Простые иконки-заглушки без внешних зависимостей */
 function mkIcon(char) {
     return function Icon({ size = 16, color, className, style, ...rest }) {
         return React.createElement("span", {
@@ -148,6 +148,11 @@ function makeTimeSlots(from, through) {
 function genTimeSlots() { return makeTimeSlots(8 * 60, 20 * 60 + 30); }
 const TIME_SLOTS = genTimeSlots();
 const END_TIME_SLOTS = makeTimeSlots(8 * 60, 23 * 60 + 30);
+
+const GRID_STEP_MIN = 30;
+const GRID_TIME_SLOTS = TIME_SLOTS.filter(t => {
+    return (toMinutes(t) - 8 * 60) % GRID_STEP_MIN === 0;
+});
 
 function toMinutes(t) { const [h, m] = t.split(":").map(Number); return h * 60 + m; }
 function minutesBetween(start, end) { const d = toMinutes(end) - toMinutes(start); return d > 0 ? d : 30; }
@@ -986,27 +991,90 @@ const recCount = state.recurring.filter(r => r.weekday === wd
         className: "text-xs font-medium text-center px-1 pb-1.5", style: { width: 84, color: p.color }
     }, noCall ? "🔕 " : "", p.name);
 }), React.createElement("div", { key: "zoomhead", className: "text-xs font-medium text-center px-1 pb-1.5 flex items-center justify-center gap-1", style: { width: ZOOM_COL_WIDTH, color: "var(--zoom)", background: "var(--zoom-wash)", borderLeft: "2px solid var(--zoom)" } }, React.createElement(Video, { size: 11 }), "Zoom · кто и что"));
-    const gridRows = TIME_SLOTS.map(t => {
-        const personCells = state.team.map(p => {
-            const occ = getOccupant(state, p.id, selectedDate, t);
-            const isPending = occ && occ.kind === "pending";
-            const color = occ ? (isPending ? "var(--pending-wash)" : (occ.kind === "dayoff" ? (DAYOFF_TYPES[occ.offType] || DAYOFF_TYPES.off).color : (OCC_COLOR[occ.kind] || "var(--manual)"))) : "transparent";
-            const extraStyle = isPending ? { border: "2px dashed var(--pending)", boxSizing: "border-box" } : {};
-            return React.createElement("button", { key: p.id, title: occ ? occ.label : "Свободно — клик, чтобы создать событие",
-                onClick: () => handleCellClick(p.id, selectedDate, t),
-                className: "cell-btn shrink-0 border-r border-b",
-                style: { width: 84, height: 26, background: color, borderColor: "#EEF0F4", cursor: "pointer", ...extraStyle } });
+        const gridRows = GRID_TIME_SLOTS.map(rowTime => {
+        const rowStart = toMinutes(rowTime);
+        const times = TIME_SLOTS.filter(t => {
+            const n = toMinutes(t);
+            return n >= rowStart && n < rowStart + GRID_STEP_MIN;
         });
-        const zi = isZoomBusyAt(state, selectedDate, t);
-        const zIsPending = zi.busy && zi.kind === "pending";
-        const zColor = !zi.busy ? "var(--zoom-wash)" : zIsPending ? "var(--zoom-pending)" : zi.kind === "recurring" ? "var(--recurring)" : zi.kind === "event" ? "var(--event)" : "var(--zoom)";
-        const zExtraStyle = zIsPending ? { border: "2px dashed var(--zoom)", boxSizing: "border-box" } : {};
-        const zoomCell = React.createElement("button", { key: "zoom", title: zi.busy ? zi.label : "Zoom свободен", onClick: () => toggleZoomSlot(selectedDate, t),
-            className: "cell-btn shrink-0 border-r border-b flex items-center px-1.5",
-            style: { width: ZOOM_COL_WIDTH, height: 26, background: zColor, borderLeft: "2px solid var(--zoom)", borderColor: "#EEF0F4", ...zExtraStyle } }, zi.busy ? React.createElement("span", { className: "text-[10px] truncate", style: { color: (zi.kind === "manual" || zIsPending) ? "var(--ink)" : "#fff", maxWidth: ZOOM_COL_WIDTH - 16 } }, zi.label) : null);
-        const timeLabel = React.createElement("div", { className: "mono text-[10px] pr-2 text-right shrink-0", style: { width: 90, color: "var(--ink-soft)" } }, t.endsWith(":00") ? t : "");
-        return React.createElement("div", { key: t, className: "flex items-center", style: { height: 26 } }, timeLabel, ...personCells, zoomCell);
+
+        const personCells = state.team.map(p =>
+            React.createElement("div", {
+                key: p.id,
+                className: "flex shrink-0 border-r border-b",
+                style: { width: 84, height: 26, borderColor: "#EEF0F4" }
+            }, times.map(t => {
+                const occ = getOccupant(state, p.id, selectedDate, t);
+                const pending = occ && occ.kind === "pending";
+                const color = !occ ? "transparent"
+                    : pending ? "var(--pending-wash)"
+                    : occ.kind === "dayoff"
+                        ? (DAYOFF_TYPES[occ.offType] || DAYOFF_TYPES.off).color
+                        : (OCC_COLOR[occ.kind] || "var(--manual)");
+
+                return React.createElement("button", {
+                    key: t,
+                    title: `${t} · ${occ ? occ.label : "Свободно — создать событие"}`,
+                    "aria-label": `${p.name}, ${t}: ${occ ? occ.label : "свободно"}`,
+                    onClick: () => handleCellClick(p.id, selectedDate, t),
+                    className: "cell-btn",
+                    style: {
+                        flex: "1 1 0", minWidth: 0, height: "100%",
+                        padding: 0, background: color, cursor: "pointer",
+                        border: pending ? "1px dashed var(--pending)" : "none",
+                        boxSizing: "border-box"
+                    }
+                });
+            }))
+        );
+
+        const zoomInfo = times.map(t => ({ t, info: isZoomBusyAt(state, selectedDate, t) }));
+        const zoomLabels = [...new Set(zoomInfo.filter(x => x.info.busy).map(x => x.info.label))];
+        const zoomCell = React.createElement("div", {
+            key: "zoom",
+            className: "relative flex shrink-0 border-r border-b",
+            style: {
+                width: ZOOM_COL_WIDTH, height: 26, borderColor: "#EEF0F4",
+                borderLeft: "2px solid var(--zoom)", boxSizing: "border-box"
+            }
+        }, zoomInfo.map(({ t, info: zi }) => {
+            const pending = zi.busy && zi.kind === "pending";
+            const color = !zi.busy ? "var(--zoom-wash)"
+                : pending ? "var(--zoom-pending)"
+                : zi.kind === "recurring" ? "var(--recurring)"
+                : zi.kind === "event" ? "var(--event)" : "var(--zoom)";
+            return React.createElement("button", {
+                key: t,
+                title: `${t} · ${zi.busy ? zi.label : "Zoom свободен"}`,
+                "aria-label": `Zoom, ${t}: ${zi.busy ? zi.label : "свободен"}`,
+                onClick: () => toggleZoomSlot(selectedDate, t),
+                className: "cell-btn",
+                style: {
+                    flex: "1 1 0", minWidth: 0, height: "100%", padding: 0,
+                    background: color, cursor: "pointer",
+                    border: pending ? "1px dashed var(--zoom)" : "none",
+                    boxSizing: "border-box"
+                }
+            });
+        }), zoomLabels.length ? React.createElement("span", {
+            className: "absolute text-[10px] truncate",
+            style: {
+                pointerEvents: "none", left: 4, right: 4, top: 4,
+                color: "var(--ink)", background: "rgba(255,255,255,0.8)",
+                borderRadius: 3, padding: "0 3px", lineHeight: "16px"
+            }
+        }, zoomLabels.join(" / ")) : null);
+
+        const timeLabel = React.createElement("div", {
+            className: "mono text-[10px] pr-2 text-right shrink-0",
+            style: { width: 90, color: "var(--ink-soft)" }
+        }, rowTime.endsWith(":00") ? rowTime : "");
+
+        return React.createElement("div", {
+            key: rowTime, className: "flex items-center", style: { height: 26 }
+        }, timeLabel, ...personCells, zoomCell);
     });
+
     const dayGridInner = state.team.length === 0
         ? React.createElement("div", { className: "text-sm py-6 text-center", style: { color: "var(--ink-soft)" } }, "Добавь участников команды слева, чтобы увидеть сетку занятости.")
         : React.createElement("div", { className: "overflow-x-auto scrollbar-thin" }, React.createElement("div", { style: { minWidth: 90 + state.team.length * 84 + 190 } }, gridHeaderRow, ...gridRows));
