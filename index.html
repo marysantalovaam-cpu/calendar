@@ -24,7 +24,7 @@ const { useState, useEffect, useCallback, useMemo, useRef } = React;
    НАСТРОЙКА: вставь сюда URL своей Firebase Realtime Database.
    ====================================================================== */
 const DB_URL = "https://calendar-84b06-default-rtdb.europe-west1.firebasedatabase.app";
-const APP_VERSION = "2026-10-06-cloudflare-02"; // меняйте эту строку при каждом деплое — по ней вкладки понимают, что вышла новая версия/* Простые иконки-заглушки без внешних зависимостей */
+const APP_VERSION = "2026-10-06-cloudflare-03"; // меняйте эту строку при каждом деплое — по ней вкладки понимают, что вышла новая версия/* Простые иконки-заглушки без внешних зависимостей */
 function mkIcon(char) {
     return function Icon({ size = 16, color, className, style, ...rest }) {
         return React.createElement("span", {
@@ -187,6 +187,40 @@ function slotsForRange(startTime, durMin) {
     if (!Number.isFinite(start) || !Number.isFinite(end) || end <= start) return [];
     return TIME_SLOTS.filter(t => toMinutes(t) < end && toMinutes(t) + SLOT_STEP_MIN > start);
 }
+function mergeGridParts(parts) {
+    const groups = [];
+    for (const part of parts) {
+        const last = groups[groups.length - 1];
+        if (last && last.key === part.key) last.times.push(part.time);
+        else groups.push({ ...part, times: [part.time] });
+    }
+    return groups;
+}
+function occupantGridKey(occ) {
+    if (!occ) return "free";
+    if (occ.request) return `request:${occ.request.id}`;
+    if (occ.event) return `event:${occ.event.id}`;
+    if (occ.recurring) return `recurring:${occ.recurring.id}`;
+    return `${occ.kind}:${occ.ownerId || ""}:${occ.offType || ""}:${occ.label || ""}`;
+}
+function zoomGridKey(state, date, time, info) {
+    if (!info.busy) return "free";
+    if (info.kind === "recurring") {
+        const r = state.recurring.find(r => r.zoom && r.weekday === weekdayOfDate(date)
+            && !(r.until && date >= r.until) && !(r.since && date < r.since)
+            && !(Array.isArray(r.excludedDates) && r.excludedDates.includes(date))
+            && slotsForRange(r.startTime, r.durationMin).includes(time));
+        return `recurring:${r ? r.id : time}`;
+    }
+    if (info.kind === "event" || info.kind === "pending") {
+        const status = info.kind === "event" ? "confirmed" : "pending";
+        const r = state.requests.find(r => r.status === status && r.zoomNeeded
+            && r.date === date && slotsForRange(r.startTime, r.duration).includes(time));
+        return `request:${r ? r.id : time}`;
+    }
+    return `manual:${time}`;
+}
+
 function getSavedMe() { try {
     return localStorage.getItem(ME_KEY) || "";
 }
@@ -269,7 +303,7 @@ async function loadState() {
         const etag = res.headers.get("ETag");
         const data = await res.json();
         if (!data || !Array.isArray(data.team) || !data.team.length) {
-            window.schedulerSaveError && window.schedulerSaveError("Календарь или команда не найдены в базе. Пустая база не будет создана автоматически.");
+            window.__schedulerSaveError && window.__schedulerSaveError("Календарь или команда не найдены в базе. Пустая база не будет создана автоматически.");
             return { ok: false, state: defaultState(), etag: null };
         }
         const loaded = data ? { ...defaultState(), ...data } : defaultState();
@@ -295,7 +329,7 @@ async function saveState(state, etag) {
     if (!base) return { ok: false, conflict: true, etag: null };
     const saved = withBotJournal(base, state);
     try {
-        const res = await fetch(`${DBURL}/${STORAGE_KEY}.json`, {
+        const res = await fetch(`${DB_URL}/${STORAGE_KEY}.json`, {
             method: "PUT",
             headers: { "Content-Type": "application/json", "if-match": etag, "X-Firebase-ETag": "true" },
             body: JSON.stringify(saved)
@@ -303,7 +337,7 @@ async function saveState(state, etag) {
         if (res.status === 412) return { ok: false, conflict: true, etag: null };
         if (!res.ok) {
             console.error("storage save rejected", res.status);
-            window.schedulerSaveError && window.schedulerSaveError(`Firebase ${res.status}: изменение не сохранено.`);
+            window.__schedulerSaveError && window.__schedulerSaveError(`Firebase ${res.status}: изменение не сохранено.`);
             return { ok: false, conflict: false, etag: null };
         }
         const nextEtag = res.headers.get("ETag");
@@ -312,7 +346,7 @@ async function saveState(state, etag) {
         return { ok: true, conflict: false, etag: nextEtag };
     } catch (e) {
         console.error("storage save failed", e);
-        window.schedulerSaveError && window.schedulerSaveError("Ошибка связи: изменение не сохранено.");
+        window.__schedulerSaveError && window.__schedulerSaveError("Ошибка связи: изменение не сохранено.");
         return { ok: false, conflict: false, etag: null };
     }
 }
@@ -991,89 +1025,84 @@ const recCount = state.recurring.filter(r => r.weekday === wd
         className: "text-xs font-medium text-center px-1 pb-1.5", style: { width: 84, color: p.color }
     }, noCall ? "🔕 " : "", p.name);
 }), React.createElement("div", { key: "zoomhead", className: "text-xs font-medium text-center px-1 pb-1.5 flex items-center justify-center gap-1", style: { width: ZOOM_COL_WIDTH, color: "var(--zoom)", background: "var(--zoom-wash)", borderLeft: "2px solid var(--zoom)" } }, React.createElement(Video, { size: 11 }), "Zoom · кто и что"));
-        const gridRows = GRID_TIME_SLOTS.map(rowTime => {
+            const gridRows = GRID_TIME_SLOTS.map(rowTime => {
         const rowStart = toMinutes(rowTime);
-        const times = TIME_SLOTS.filter(t => {
-            const n = toMinutes(t);
-            return n >= rowStart && n < rowStart + GRID_STEP_MIN;
-        });
+        const times = TIME_SLOTS.filter(t => toMinutes(t) >= rowStart
+            && toMinutes(t) < rowStart + GRID_STEP_MIN);
 
-        const personCells = state.team.map(p =>
-            React.createElement("div", {
-                key: p.id,
-                className: "flex shrink-0 border-r border-b",
+        const personCells = state.team.map(p => {
+            const groups = mergeGridParts(times.map(time => {
+                const occ = getOccupant(state, p.id, selectedDate, time);
+                return { time, key: occupantGridKey(occ), occ };
+            }));
+            return React.createElement("div", {
+                key: p.id, className: "flex shrink-0 border-r border-b",
                 style: { width: 84, height: 26, borderColor: "#EEF0F4" }
-            }, times.map(t => {
-                const occ = getOccupant(state, p.id, selectedDate, t);
+            }, groups.map(group => {
+                const occ = group.occ;
                 const pending = occ && occ.kind === "pending";
-                const color = !occ ? "transparent"
-                    : pending ? "var(--pending-wash)"
-                    : occ.kind === "dayoff"
-                        ? (DAYOFF_TYPES[occ.offType] || DAYOFF_TYPES.off).color
-                        : (OCC_COLOR[occ.kind] || "var(--manual)");
-
+                const color = !occ ? "transparent" : pending ? "var(--pending-wash)"
+                    : occ.kind === "dayoff" ? (DAYOFF_TYPES[occ.offType] || DAYOFF_TYPES.off).color
+                    : (OCC_COLOR[occ.kind] || "var(--manual)");
+                const start = group.times[0];
+                const rangeEnd = endTimeFromDuration(group.times[group.times.length - 1], SLOT_STEP_MIN);
                 return React.createElement("button", {
-                    key: t,
-                    title: `${t} · ${occ ? occ.label : "Свободно — создать событие"}`,
-                    "aria-label": `${p.name}, ${t}: ${occ ? occ.label : "свободно"}`,
-                    onClick: () => handleCellClick(p.id, selectedDate, t),
+                    key: `${group.key}:${start}`,
+                    title: `${start}–${rangeEnd} · ${occ ? occ.label : "Свободно — создать событие"}`,
+                    "aria-label": `${p.name}, ${start}–${rangeEnd}: ${occ ? occ.label : "свободно"}`,
+                    onClick: () => handleCellClick(p.id, selectedDate, start),
                     className: "cell-btn",
                     style: {
-                        flex: "1 1 0", minWidth: 0, height: "100%",
+                        flex: `${group.times.length} 1 0`, minWidth: 0, height: "100%",
                         padding: 0, background: color, cursor: "pointer",
                         border: pending ? "1px dashed var(--pending)" : "none",
                         boxSizing: "border-box"
                     }
                 });
-            }))
-        );
+            }));
+        });
 
-        const zoomInfo = times.map(t => ({ t, info: isZoomBusyAt(state, selectedDate, t) }));
-        const zoomLabels = [...new Set(zoomInfo.filter(x => x.info.busy).map(x => x.info.label))];
+        const zoomGroups = mergeGridParts(times.map(time => {
+            const info = isZoomBusyAt(state, selectedDate, time);
+            return { time, info, key: zoomGridKey(state, selectedDate, time, info) };
+        }));
         const zoomCell = React.createElement("div", {
-            key: "zoom",
-            className: "relative flex shrink-0 border-r border-b",
-            style: {
-                width: ZOOM_COL_WIDTH, height: 26, borderColor: "#EEF0F4",
-                borderLeft: "2px solid var(--zoom)", boxSizing: "border-box"
-            }
-        }, zoomInfo.map(({ t, info: zi }) => {
-            const pending = zi.busy && zi.kind === "pending";
-            const color = !zi.busy ? "var(--zoom-wash)"
-                : pending ? "var(--zoom-pending)"
+            key: "zoom", className: "flex shrink-0 border-r border-b",
+            style: { width: ZOOM_COL_WIDTH, height: 26, borderColor: "#EEF0F4",
+                borderLeft: "2px solid var(--zoom)", boxSizing: "border-box" }
+        }, zoomGroups.map(group => {
+            const zi = group.info, pending = zi.busy && zi.kind === "pending";
+            const color = !zi.busy ? "var(--zoom-wash)" : pending ? "var(--zoom-pending)"
                 : zi.kind === "recurring" ? "var(--recurring)"
                 : zi.kind === "event" ? "var(--event)" : "var(--zoom)";
+            const start = group.times[0];
+            const rangeEnd = endTimeFromDuration(group.times[group.times.length - 1], SLOT_STEP_MIN);
             return React.createElement("button", {
-                key: t,
-                title: `${t} · ${zi.busy ? zi.label : "Zoom свободен"}`,
-                "aria-label": `Zoom, ${t}: ${zi.busy ? zi.label : "свободен"}`,
-                onClick: () => toggleZoomSlot(selectedDate, t),
-                className: "cell-btn",
+                key: `${group.key}:${start}`,
+                title: `${start}–${rangeEnd} · ${zi.busy ? zi.label : "Zoom свободен"}`,
+                onClick: () => toggleZoomSlot(selectedDate, start),
+                className: "cell-btn flex items-center",
                 style: {
-                    flex: "1 1 0", minWidth: 0, height: "100%", padding: 0,
-                    background: color, cursor: "pointer",
+                    flex: `${group.times.length} 1 0`, minWidth: 0, height: "100%",
+                    padding: "0 3px", background: color, cursor: "pointer",
                     border: pending ? "1px dashed var(--zoom)" : "none",
                     boxSizing: "border-box"
                 }
-            });
-        }), zoomLabels.length ? React.createElement("span", {
-            className: "absolute text-[10px] truncate",
-            style: {
-                pointerEvents: "none", left: 4, right: 4, top: 4,
-                color: "var(--ink)", background: "rgba(255,255,255,0.8)",
-                borderRadius: 3, padding: "0 3px", lineHeight: "16px"
-            }
-        }, zoomLabels.join(" / ")) : null);
+            }, zi.busy ? React.createElement("span", {
+                className: "text-[10px] truncate",
+                style: { color: zi.kind === "manual" || pending ? "var(--ink)" : "#fff" }
+            }, zi.label) : null);
+        }));
 
         const timeLabel = React.createElement("div", {
             className: "mono text-[10px] pr-2 text-right shrink-0",
             style: { width: 90, color: "var(--ink-soft)" }
         }, rowTime.endsWith(":00") ? rowTime : "");
-
         return React.createElement("div", {
             key: rowTime, className: "flex items-center", style: { height: 26 }
         }, timeLabel, ...personCells, zoomCell);
     });
+
 
     const dayGridInner = state.team.length === 0
         ? React.createElement("div", { className: "text-sm py-6 text-center", style: { color: "var(--ink-soft)" } }, "Добавь участников команды слева, чтобы увидеть сетку занятости.")
