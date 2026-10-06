@@ -24,7 +24,7 @@ const { useState, useEffect, useCallback, useMemo, useRef } = React;
    НАСТРОЙКА: вставь сюда URL своей Firebase Realtime Database.
    ====================================================================== */
 const DB_URL = "https://calendar-84b06-default-rtdb.europe-west1.firebasedatabase.app";
-const APP_VERSION = "2026-08-27-01"; // меняйте эту строку при каждом деплое — по ней вкладки понимают, что вышла новая версия/* Простые иконки-заглушки без внешних зависимостей */
+const APP_VERSION = "2026-10-06-cloudflare-01"; // меняйте эту строку при каждом деплое — по ней вкладки понимают, что вышла новая версия/* Простые иконки-заглушки без внешних зависимостей */
 function mkIcon(char) {
     return function Icon({ size = 16, color, className, style, ...rest }) {
         return React.createElement("span", {
@@ -59,8 +59,9 @@ const ME_KEY = "scheduler_me_id_v1";
    Telegram просто не отправляются (в консоли будет предупреждение),
    остальной функционал планировщика при этом не ломается.
    ====================================================================== */
-const TELEGRAM_BOT_TOKEN = "8248729162:AAH7pFSqGCCnL0sK-4BI4Gq3ryYhO0H-g-Q"; // например "123456:AAExxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
-const TELEGRAM_CHAT_ID = "-1004450460150"; // например "-1001234567890"
+// Токен Telegram хранится только в Cloudflare Secrets.
+
+const TELEGRAM_CHAT_ID = "-1002545013552"; // например "-1001234567890"
 const TELEGRAM_USERNAMES = {
     "Маша": "fq_mry",
     "Аревик": "Arevik_marketing",
@@ -117,27 +118,10 @@ function zoomHelperAskLine(req) {
     return `\n${tgMention(ZOOM_LINK_HELPER_NAME)}, нужна ссылка на Zoom для «${req.title}».`;
 }
 async function sendTelegram(text) {
-    if (!TELEGRAM_BOT_TOKEN || !TELEGRAM_CHAT_ID) {
-        console.warn("Telegram уведомление не отправлено — не заданы TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID", text);
-        return false;
-    }
-    try {
-        const res = await fetch(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ chat_id: TELEGRAM_CHAT_ID, text, parse_mode: "HTML", disable_web_page_preview: true })
-        });
-        if (!res.ok) {
-            console.error("Telegram send rejected", res.status, await res.text().catch(() => ""));
-            return false;
-        }
-        return true;
-    }
-    catch (e) {
-        console.error("Telegram send failed", e);
-        return false;
-    }
+    // Telegram отправляет Cloudflare Worker после сохранения Firebase.
+    return false;
 }
+
 const PALETTE = ["#4F5FFF", "#0EA5A0", "#E0578A", "#D97E1B", "#6B5CE0", "#2E9E5B", "#C2410C", "#0F7CBF", "#B8860B", "#8B5CF6"];
 const WEEKDAYS = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"];
 const MONTHS = ["январь", "февраль", "март", "апрель", "май", "июнь", "июль", "август", "сентябрь", "октябрь", "ноябрь", "декабрь"];
@@ -152,17 +136,19 @@ const DAYOFF_TYPES = {
 };
 function pad(n) { return String(n).padStart(2, "0"); }
 function dateStr(y, m, d) { return `${y}-${pad(m + 1)}-${pad(d)}`; }
-function todayStr() { const t = new Date(); return dateStr(t.getFullYear(), t.getMonth(), t.getDate()); }
+function todayStr() { return moscowTodayStr(); }
 function weekdayOfDate(ds) { const [y, m, d] = ds.split("-").map(Number); return (new Date(y, m - 1, d).getDay() + 6) % 7; }
-function genTimeSlots() { const out = []; for (let h = 8; h <= 20; h++) {
-    out.push(`${pad(h)}:00`);
-    out.push(`${pad(h)}:30`);
-} return out; }
+const SLOT_STEP_MIN = 5;
+function makeTimeSlots(from, through) {
+    const out = [];
+    for (let n = from; n <= through; n += SLOT_STEP_MIN)
+        out.push(`${pad(Math.floor(n / 60))}:${pad(n % 60)}`);
+    return out;
+}
+function genTimeSlots() { return makeTimeSlots(8 * 60, 20 * 60 + 30); }
 const TIME_SLOTS = genTimeSlots();
-const END_TIME_SLOTS = (function () { const out = []; for (let h = 8; h <= 23; h++) {
-    out.push(`${pad(h)}:00`);
-    out.push(`${pad(h)}:30`);
-} return out; })(); // варианты окончания — шире стартовых, чтобы влезали длинные события
+const END_TIME_SLOTS = makeTimeSlots(8 * 60, 23 * 60 + 30);
+
 function toMinutes(t) { const [h, m] = t.split(":").map(Number); return h * 60 + m; }
 function minutesBetween(start, end) { const d = toMinutes(end) - toMinutes(start); return d > 0 ? d : 30; }
 // Все времена в приложении считаются московскими (UTC+3, без перехода на летнее время),
@@ -191,11 +177,11 @@ function meetingEnded(r) { return minutesUntil(r.date, r.startTime) <= -(r.durat
 function endTimeFromDuration(start, durMin) { const total = toMinutes(start) + durMin; const h = Math.floor(total / 60), m = total % 60; return `${pad(h)}:${pad(m)}`; }
 function endOptionsAfter(start) { return END_TIME_SLOTS.filter(t => toMinutes(t) > toMinutes(start)); }
 function slotIndex(t) { return TIME_SLOTS.indexOf(t); }
-function slotsForRange(startTime, durMin) { const n = Math.max(1, Math.round(durMin / 30)); const startIdx = slotIndex(startTime); if (startIdx < 0)
-    return []; const out = []; for (let i = 0; i < n; i++) {
-    if (TIME_SLOTS[startIdx + i])
-        out.push(TIME_SLOTS[startIdx + i]);
-} return out; }
+function slotsForRange(startTime, durMin) {
+    const start = toMinutes(startTime), end = start + Number(durMin);
+    if (!Number.isFinite(start) || !Number.isFinite(end) || end <= start) return [];
+    return TIME_SLOTS.filter(t => toMinutes(t) < end && toMinutes(t) + SLOT_STEP_MIN > start);
+}
 function getSavedMe() { try {
     return localStorage.getItem(ME_KEY) || "";
 }
@@ -218,6 +204,54 @@ function defaultState() {
 // обязан НЕ сохранять поверх — см. коммент у commit(). Дополнительно возвращает etag —
 // версию данных на сервере на момент чтения (см. saveState/commit для того, зачем это
 // нужно: условная запись, которая не даёт затереть чужие изменения).
+
+const BOT_FIELDS = {
+    requests: ["id","title","date","startTime","duration","attendees","zoomNeeded","zoomLink","zoomSetupDone","notes","status","responses","createdBy"],
+    recurring: ["id","title","weekday","startTime","durationMin","attendees","zoom","notes","since","until","excludedDates"],
+    busyEvents: ["id","title","kind","date","startTime","duration","creatorId","participants","notes"],
+    dayOffs: ["personId","date","type","note","notes"],
+    noCallDays: ["personId","date","note"]
+};
+function botArray(v) { return (Array.isArray(v) ? v : Object.values(v || {})).filter(Boolean); }
+function botCompact(type, item) {
+    const out = {};
+    for (const k of BOT_FIELDS[type]) if (item[k] !== undefined) out[k] = item[k];
+    return out;
+}
+function botKey(e) { return e.id || `${e.personId}|${e.date}`; }
+function botChanges(before, after) {
+    const result = [];
+    for (const type of Object.keys(BOT_FIELDS)) {
+        const a = new Map(botArray(before[type]).map(e => [botKey(e), botCompact(type,e)]));
+        const b = new Map(botArray(after[type]).map(e => [botKey(e), botCompact(type,e)]));
+        for (const key of new Set([...a.keys(),...b.keys()])) {
+            const old = a.get(key) || null, cur = b.get(key) || null;
+            if (JSON.stringify(old) !== JSON.stringify(cur)) result.push({type,key,old,cur});
+        }
+    }
+    return result;
+}
+
+const BOT_BASES = new Map();
+function rememberBotBase(etag, state) {
+    if (!etag) return;
+    BOT_BASES.set(etag, structuredClone(state));
+    while (BOT_BASES.size > 16) BOT_BASES.delete(BOT_BASES.keys().next().value);
+}
+function withBotJournal(before, after) {
+    const saved = structuredClone(after);
+    const changes = botChanges(before, after);
+    saved.botJournal = botArray(before.botJournal);
+    saved.botJournalSeq = Number(before.botJournalSeq || 0);
+    if (changes.length) {
+        saved.botJournalSeq += 1;
+        saved.botJournal.push({seq:saved.botJournalSeq, changes,
+            team: botArray(after.team).map(p => ({id:p.id,name:p.name,core:!!p.core}))});
+        saved.botJournal = saved.botJournal.slice(-80);
+    }
+    return saved;
+}
+
 async function loadState() {
     try {
         const res = await fetch(`${DB_URL}/${STORAGE_KEY}.json`, { headers: { "X-Firebase-ETag": "true" } });
@@ -229,7 +263,13 @@ async function loadState() {
         }
         const etag = res.headers.get("ETag");
         const data = await res.json();
-        return { ok: true, state: data ? { ...defaultState(), ...data } : defaultState(), etag };
+        if (!data || !Array.isArray(data.team) || !data.team.length) {
+            window.schedulerSaveError && window.schedulerSaveError("Календарь или команда не найдены в базе. Пустая база не будет создана автоматически.");
+            return { ok: false, state: defaultState(), etag: null };
+        }
+        const loaded = data ? { ...defaultState(), ...data } : defaultState();
+        rememberBotBase(etag, loaded);
+        return { ok: true, state: loaded, etag };
     }
     catch (e) {
         console.error("load failed", e);
@@ -246,39 +286,28 @@ async function loadState() {
 // действие поверх них заново. Если etag не передан (например, самое первое сохранение в этой
 // вкладке) — пишем безусловно, как раньше.
 async function saveState(state, etag) {
+    const base = etag && BOT_BASES.get(etag);
+    if (!base) return { ok: false, conflict: true, etag: null };
+    const saved = withBotJournal(base, state);
     try {
-        const headers = { "Content-Type": "application/json" };
-        if (etag)
-            headers["if-match"] = etag;
-        const res = await fetch(`${DB_URL}/${STORAGE_KEY}.json`, {
+        const res = await fetch(`${DBURL}/${STORAGE_KEY}.json`, {
             method: "PUT",
-            headers,
-            body: JSON.stringify(state)
+            headers: { "Content-Type": "application/json", "if-match": etag, "X-Firebase-ETag": "true" },
+            body: JSON.stringify(saved)
         });
-        if (res.status === 412) {
-            // Это не ошибка сети и не сбой — это ровно та защита, ради которой всё затевалось:
-            // кто-то другой сохранил более свежую версию, пока мы готовили своё изменение.
-            return { ok: false, conflict: true, etag: null };
-        }
+        if (res.status === 412) return { ok: false, conflict: true, etag: null };
         if (!res.ok) {
-            const body = await res.text().catch(() => "");
-            console.error("storage save rejected", res.status, body);
-            window.__schedulerSaveError && window.__schedulerSaveError(`Firebase отклонил запись (${res.status}). Проверь Rules.`);
+            console.error("storage save rejected", res.status);
+            window.schedulerSaveError && window.schedulerSaveError(`Firebase ${res.status}: изменение не сохранено.`);
             return { ok: false, conflict: false, etag: null };
         }
-        // Забираем etag только что записанных данных, чтобы СЛЕДУЮЩЕЕ сохранение из этой же
-        // вкладки снова было условным (а не безусловным), даже если сервер не вернул ETag в
-        // заголовках самого PUT-ответа (поведение может отличаться в разных окружениях).
-        let newEtag = res.headers.get("ETag");
-        if (!newEtag) {
-            const check = await fetch(`${DB_URL}/${STORAGE_KEY}.json`, { headers: { "X-Firebase-ETag": "true" } }).catch(() => null);
-            newEtag = check && check.ok ? check.headers.get("ETag") : null;
-        }
-        return { ok: true, conflict: false, etag: newEtag };
-    }
-    catch (e) {
+        const nextEtag = res.headers.get("ETag");
+        rememberBotBase(nextEtag, saved);
+        // Если PUT не вернул ETag, следующий commit перечитает базу через существующий retry.
+        return { ok: true, conflict: false, etag: nextEtag };
+    } catch (e) {
         console.error("storage save failed", e);
-        window.__schedulerSaveError && window.__schedulerSaveError("Не удалось сохранить — проверь DB_URL и интернет-соединение.");
+        window.schedulerSaveError && window.schedulerSaveError("Ошибка связи: изменение не сохранено.");
         return { ok: false, conflict: false, etag: null };
     }
 }
@@ -310,11 +339,10 @@ function getOccupant(state, personId, date, time) {
     });
     if (rec)
         return { kind: "recurring", label: rec.title, recurring: rec };
-    const confirmedSlot = state.busySlots.find(s => s.personId === personId && s.date === date && s.time === time && s.type === "event");
-    if (confirmedSlot) {
-        const req = state.requests.find(r => r.id === confirmedSlot.requestId);
-        return { kind: "confirmed", label: confirmedSlot.label, request: req };
-    }
+    const confirmedReq = state.requests.find(r => r.status === "confirmed" && r.date === date
+        && (r.attendees || []).includes(personId) && slotsForRange(r.startTime, r.duration).includes(time));
+    if (confirmedReq) return { kind: "confirmed", label: confirmedReq.title, request: confirmedReq };
+
     // Ещё не подтверждённое (не все ответили) предложение созвона — тоже должно быть видно в сетке,
     // чтобы время не занимали задвоенно, пока согласование не завершилось.
     const pendingReq = state.requests.find(r => r.status === "pending" && r.attendees.includes(personId) && r.date === date && slotsForRange(r.startTime, r.duration).includes(time));
@@ -345,9 +373,12 @@ function isZoomBusyAt(state, date, time) {
     && slotsForRange(r.startTime, r.durationMin).includes(time));    
   if (rec)
         return { busy: true, kind: "recurring", label: rec.title };
-    const z = state.zoomSlots.find(s => s.date === date && s.time === time);
-    if (z)
-        return { busy: true, kind: z.kind === "event" ? "event" : "manual", label: z.label || "Zoom занят" };
+    const confirmedReq = state.requests.find(r => r.status === "confirmed" && r.zoomNeeded
+        && r.date === date && slotsForRange(r.startTime, r.duration).includes(time));
+    if (confirmedReq) return { busy: true, kind: "event", label: confirmedReq.title };
+    const z = state.zoomSlots.find(z => z.kind !== "event" && z.date === date
+        && slotsForRange(z.time, z.durationMin || 30).includes(time));
+    if (z) return { busy: true, kind: "manual", label: z.label || "Zoom занят" };
     const pendingReq = state.requests.find(r => r.status === "pending" && r.zoomNeeded && r.date === date && slotsForRange(r.startTime, r.duration).includes(time));
     if (pendingReq)
         return { busy: true, kind: "pending", label: `${pendingReq.title} (Zoom предложен, ждёт подтверждения)` };
@@ -368,7 +399,7 @@ stateRef.current = state; // синхронно обновляется на ка
   const [loading, setLoading] = useState(true);
     const [me, setMeRaw] = useState("");
     const [adminRealId, setAdminRealId] = useState(""); // настоящая личность вошедшего — не меняется при просмотре "как другой человек"
-    const [viewYM, setViewYM] = useState(() => { const t = new Date(); return { y: t.getFullYear(), m: t.getMonth() }; });
+const [viewYM, setViewYM] = useState(() => { const t = moscowNowParts(); return { y: t.y, m: t.mo }; });
     const [selectedDate, setSelectedDate] = useState(todayStr());
     const [showNewEvent, setShowNewEvent] = useState(false);
     const [rescheduleSeed, setRescheduleSeed] = useState(null);
@@ -464,137 +495,8 @@ useEffect(() => {
     const id = setInterval(checkForUpdate, 120000);
     return () => clearInterval(id);
 }, []);
-    // Напоминание о сегодняшних созвонах в Telegram — лучшее, что можно сделать без сервера:
-    // отправляется РОВНО ОДИН РАЗ В ДЕНЬ на всю команду. Флаг "уже отправлено" хранится в общей
-    // базе (state.lastReminderDate), а не в localStorage каждого браузера — поэтому неважно,
-    // сколько человек и сколько раз откроют планировщик в этот день: сообщение уйдёт один раз,
-    // тому, кто окажется первым, остальные при заходе просто увидят, что день уже обработан.
-    // Для гарантированной ежедневной рассылки по расписанию (даже если никто не открыл вкладку)
-    // нужен отдельный сервер/облачная функция с cron — это не может сделать статический HTML.
-    useEffect(() => {
-if (loading || !me) return;
-function checkDailyDigest() {
-    const s = stateRef.current;
-    if (moscowHour() < 19) return; // раньше 19:00 по Москве — рано
-    const today = moscowTodayStr(); // ключ дня — от него считаем, что дайджест уже уходил
-    if (s.lastReminderDate === today) return;
-    claimReminder(`daily-${today}`).then(won => {
-        if (!won) {
-            commit(x => { if (x.lastReminderDate !== today) x.lastReminderDate = today; return x; });
-            return;
-        }
-        commit(x => { x.lastReminderDate = today; return x; });
-        const tomorrow = moscowTomorrowStr();
-        const wd = weekdayOfDate(tomorrow);
-        const tomorrowsRecurring = s.recurring.filter(r => r.weekday === wd
-    && !(r.until && tomorrow >= r.until)
-    && !(r.since && tomorrow < r.since)
-    && !(Array.isArray(r.excludedDates) && r.excludedDates.includes(tomorrow)));
-        function recurringAttendeeIds(r) {
-            if (r.attendees === "all") return s.team.map(p => p.id);
-            if (r.attendees === "core") return s.team.filter(p => p.core).map(p => p.id);
-            return Array.isArray(r.attendees) ? r.attendees : [];
-        }
-        const items = [
-            ...s.requests
-                .filter(r => r.date === tomorrow && r.status === "confirmed")
-                .map(r => ({
-                    time: r.startTime,
-                    text: `${r.startTime} — ${r.title} (${r.attendees.map(a => tgMention(personName(s.team, a))).join(", ")})${r.zoomNeeded && !r.zoomSetupDone ? " ⚠️ нет ссылки на Zoom" : ""}`
-                })),
-            ...tomorrowsRecurring.map(r => ({
-                time: r.startTime,
-                text: `${r.startTime} — ${r.title} (регулярная встреча${r.zoom ? ", Zoom" : ""}: ${recurringAttendeeIds(r).map(a => tgMention(personName(s.team, a))).join(", ")})`
-            }))
-        ].sort((a, b) => a.time.localeCompare(b.time));
-        // НОВОЕ — кто отсутствует завтра: отгулы/отпуск/болезнь + личные события "не будет на месте"
-        const absenceItems = [
-            ...s.dayOffs.filter(o => o.date === tomorrow).map(o => {
-                const t = DAYOFF_TYPES[o.type] || DAYOFF_TYPES.off;
-                return `${t.emoji} ${tgMention(personName(s.team, o.personId))} — ${t.label.toLowerCase()}, весь день`;
-            }),
-            ...(s.busyEvents || []).filter(e => e.date === tomorrow && (e.kind === "away" || e.kind === "custom")).map(e =>
-                `🚫 ${tgMention(personName(s.team, e.creatorId))} — ${e.title}, ${e.startTime}–${endTimeFromDuration(e.startTime, e.duration)}`
-            )
-        ];
-      const noCallItems = (s.noCallDays || []).filter(n => n.date === tomorrow).map(n =>
-    `🔕 ${tgMention(personName(s.team, n.personId))} — не ставить созвоны${n.note ? ` (${n.note})` : ""}`
-);  
-      const parts = [`📅 План на завтра, ${tomorrow}:`, items.length ? items.map(i => i.text).join("\n") : "Созвонов не запланировано."];
-        if (absenceItems.length) parts.push("", "Отсутствия:", absenceItems.join("\n"));
-        if (noCallItems.length) parts.push("", "Просьбы не звонить:", noCallItems.join("\n"));
+    // Рассылки выполняет Cloudflare Worker, браузерных таймеров больше нет.    
 
-        sendTelegram(parts.join("\n"));
-    });
-}
-checkDailyDigest();
-const id = setInterval(checkDailyDigest, 60000);
-return () => clearInterval(id);
-}, [loading, me]);
-    // Напоминание за 10 минут до созвона в Telegram: тегает всех участников и присылает ссылку
-    // на Zoom (если она уже есть). Как и с дневной сводкой, чтобы сообщение не дублировалось,
-    // если у нескольких людей планировщик открыт одновременно, факт отправки помечается прямо на
-    // самой встрече в общей базе (r.tenMinReminded) — как только кто-то один это заметил и
-    // отправил, остальные видят отметку и повторно не шлют.
-    // Основное окно отправки — от 10 минут до начала и примерно до начала встречи. Но если в этот
-    // момент вообще ни у кого не было открыто окно планировщика, сообщение может быть отправлено
-    // позже — как только кто-то откроет вкладку (в пределах часа после начала), чтобы напоминание
-    // всё равно дошло, пусть и с опозданием. Полностью гарантировать доставку "минута в минуту"
-    // без открытой вкладки ни у кого статический HTML не может — для этого нужен отдельный сервер
-    // с cron/планировщиком задач.
-   async function claimReminder(reqId) {
-    const path = `${DB_URL}/reminderClaims/${reqId}.json`;
-    try {
-        const res = await fetch(path, { headers: { "X-Firebase-ETag": "true" } });
-        if (!res.ok) return false;
-        const etag = res.headers.get("ETag");
-        const existing = await res.json();
-        if (existing) return false; // кто-то уже отправил
-        const putRes = await fetch(path, {
-            method: "PUT",
-            headers: { "Content-Type": "application/json", ...(etag ? { "if-match": etag } : {}) },
-            body: JSON.stringify(true)
-        });
-        if (putRes.status === 412) return false; // кто-то успел записать раньше нас — не наша победа
-        return putRes.ok;
-    }
-    catch (e) {
-        console.error("claimReminder failed", e);
-        return false;
-    }
-}
-useEffect(() => {
-    if (loading || !me)
-        return;
-    function checkUpcoming() {
-    const today = moscowTodayStr(); // московская дата, а не локальная дата устройства —
-                                     // иначе у людей не в MSK окно сверки могло расходиться на 1–2 часа
-    state.requests.forEach(r => {
-            if (r.status !== "confirmed" || r.date !== today || r.tenMinReminded)
-                return;
-            const mins = minutesUntil(r.date, r.startTime);
-            if (mins <= 10 && mins > -60) {
-                claimReminder(r.id).then(won => {
-                    if (!won) return;
-                    commit(s => {
-                        const rr = s.requests.find(x => x.id === r.id);
-                        if (rr && !rr.tenMinReminded)
-                            rr.tenMinReminded = true;
-                        return s;
-                    });
-                    const mentions = r.attendees.map(id => tgMention(personName(state.team, id))).join(", ");
-                    const linkLine = r.zoomLink ? `\nZoom: ${r.zoomLink}` : (r.zoomNeeded ? `\n⚠️ ссылки на Zoom пока нет — срочно нужна!${zoomHelperAskLine(r)}` : "");
-                    const isLate = mins < -1;
-                    const whenLine = isLate ? `⚠️ Уже началось (${Math.abs(Math.round(mins))} мин назад)` : `⏰ Через ${Math.max(0, Math.round(mins))} минут`;
-                    sendTelegram(`${whenLine}: <b>${r.title}</b>\n${r.date} · ${r.startTime}\nУчастники: ${mentions}${linkLine}${r.notes ? `\n${r.notes}` : ""}`);
-                });
-            }
-        });
-    }
-    checkUpcoming();
-    const id = setInterval(checkUpcoming, 30000);
-    return () => clearInterval(id);
-}, [loading, me, state.requests, state.team]);
     function flash(msg) { setToast(msg); setTimeout(() => setToast(""), 2200); }
     // Ручная резервная копия — скачивает текущее состояние (то, что видно в интерфейсе прямо
     // сейчас) в JSON-файл. Полезно сделать перед любыми рискованными изменениями или просто
@@ -656,11 +558,8 @@ useEffect(() => {
 }
    async function commit(mutator) {
         if (!dbSyncedRef.current) {
-            flash("Нет связи с базой данных — это изменение НЕ сохранится. Обнови страницу.");
-            const next = mutator(structuredClone(stateRef.current));
-            stateRef.current = next;
-            setState(next);
-            return;
+            flash("Нет связи с базой данных — изменение не сохранено. Обнови страницу.");
+            return false;
         }
         const localNext = mutator(structuredClone(stateRef.current));
         stateRef.current = localNext; // сразу обновляем, чтобы следующий commit() (даже до перерендера) видел актуальные данные
@@ -697,20 +596,16 @@ useEffect(() => {
     }
     function toggleZoomSlot(date, time) {
         const info = isZoomBusyAt(state, date, time);
-        if (info.busy && info.kind === "recurring") {
-            flash("Занято повторяющейся встречей");
-            return;
-        }
-        if (info.busy && info.kind === "event") {
-            flash("Занято подтверждённым созвоном");
-            return;
-        }
+        if (info.busy && info.kind !== "manual") { flash("Занято встречей или предложением созвона"); return; }
         commit(s => {
-            const idx = s.zoomSlots.findIndex(z => z.date === date && z.time === time);
-            if (idx >= 0)
-                s.zoomSlots.splice(idx, 1);
-            else
-                s.zoomSlots.push({ id: "z_" + Date.now().toString(36) + Math.random().toString(36).slice(2, 5), date, time, kind: "manual", label: "Zoom занят" });
+            const idx = s.zoomSlots.findIndex(z => z.kind !== "event" && z.date === date
+                && slotsForRange(z.time, z.durationMin || 30).includes(time));
+            if (idx >= 0) {
+                const old = s.zoomSlots.splice(idx, 1)[0];
+                for (const t of slotsForRange(old.time, old.durationMin || 30)) {
+                    if (t !== time) s.zoomSlots.push({ ...old, id: `z_${date}_${t}`, time: t, durationMin: SLOT_STEP_MIN });
+                }
+            } else s.zoomSlots.push({ id: `z_${date}_${time}`, date, time, kind: "manual", label: "Zoom занят", durationMin: SLOT_STEP_MIN });
             return s;
         });
     }
