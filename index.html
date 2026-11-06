@@ -24,7 +24,7 @@ const { useState, useEffect, useCallback, useMemo, useRef } = React;
    НАСТРОЙКА: вставь сюда URL своей Firebase Realtime Database.
    ====================================================================== */
 const DB_URL = "https://calendar-84b06-default-rtdb.europe-west1.firebasedatabase.app";
-const APP_VERSION = "2026-10-06-cloudflare-04"; // меняйте эту строку при каждом деплое — по ней вкладки понимают, что вышла новая версия/* Простые иконки-заглушки без внешних зависимостей */
+const APP_VERSION = "2026-11-06"; // меняйте эту строку при каждом деплое — по ней вкладки понимают, что вышла новая версия/* Простые иконки-заглушки без внешних зависимостей */
 function mkIcon(char) {
     return function Icon({ size = 16, color, className, style, ...rest }) {
         return React.createElement("span", {
@@ -64,12 +64,11 @@ const ME_KEY = "scheduler_me_id_v1";
 const TELEGRAM_CHAT_ID = "-1002545013552"; // например "-1001234567890"
 const TELEGRAM_USERNAMES = {
     "Маша": "fq_mry",
-    "Аревик": "Arevik_marketing",
     "Алёна": "alenazalubovina",
-    "Лиза": "elizaveta_bakalina",
     "Даша": "defeard",
     "Эльза": "elszaa",
-    "Лера": "valeriaangeny",
+    "Юля": "alayjuly",
+    "Анна": "anzapp",
     "Света": "nosyrevas",
     "Зина": "zgorodova",
     "Катя": "kateredpanda"
